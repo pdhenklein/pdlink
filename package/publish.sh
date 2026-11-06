@@ -19,7 +19,7 @@ cp build-package.sh publish.sh VERSION "$REPO/package/"
 cp shim/* "$REPO/package/shim/"
 cp installer/installer.cpp installer/build.bat "$REPO/package/installer/"
 cp ../Vencord/scripts/build/common.mjs ../Vencord/scripts/build/build.mjs "$REPO/vencord-build/"
-(cd "$REPO" && git add -A && (git diff --cached --quiet || git commit -q -m "Versao $VER" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>") && git push -q)
+(cd "$REPO" && git add -A && (git diff --cached --quiet || git commit -q -m "Versao $VER") && git push -q)
 
 gh release create "v$VER" release/* --repo pdhenklein/golive-p2p --title "GoLive P2P $VER" --notes "$NOTES"
 echo "publicado v$VER"

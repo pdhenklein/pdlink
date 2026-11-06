@@ -109,9 +109,34 @@ function overlayMap(m: any) {
     return out;
 }
 
+interface VolumeStore {
+    getLocalVolume(userId: string, ctx: string): number;
+    isLocalMute(userId: string, ctx: string): boolean;
+}
+
+/** Aplica ao <video> o volume e o "silenciar" que o usuario escolheu nos controles nativos da transmissao. */
+export function applyLocalAudio(v: { volume: number; muted: boolean; }, media: VolumeStore, userId: string) {
+    // sem ajuste feito, o Discord devolve o volume padrao dele para transmissoes (bem baixo); aqui conta como 100%
+    const def = media.getLocalVolume("0", "stream");
+    const cur = media.getLocalVolume(userId, "stream");
+    const pct = cur === def ? 100 : cur;
+    v.volume = Math.max(0, Math.min(1, pct / 100));
+    v.muted = !!media.isLocalMute(userId, "stream");
+}
+
 function P2PVideo(props: any) {
     const { className, onResize, onReady, streamId } = props;
     const ref = useRef<HTMLVideoElement>(null);
+    useEffect(() => {
+        const v = ref.current;
+        const media = stores.MediaEngineStore;
+        if (!v || !media || streamId === LOCAL_VIDEO_ID) return;
+        const uid = String(streamId).slice(REMOTE_PREFIX.length);
+        const apply = () => { try { applyLocalAudio(v, media, uid); } catch { } };
+        apply();
+        media.addChangeListener(apply);
+        return () => media.removeChangeListener(apply);
+    }, [streamId]);
     useEffect(() => {
         const v = ref.current;
         if (!v) return;

@@ -1725,6 +1725,39 @@ static int cmdInteractive() {
     return runCapture(o);
 }
 
+// Informa onde a janela (ou tela) transmitida esta, em pixels fisicos, uma linha JSON a cada mudanca.
+// A janela transparente de marcacoes usa isso para ficar exatamente sobre a imagem que os espectadores veem.
+static int cmdRect(HWND hwnd, int monitor) {
+    std::thread([] { char b[64]; while (fread(b, 1, sizeof b, stdin) > 0) {} ExitProcess(0); }).detach();
+    std::string last;
+    for (;;) {
+        char b[160];
+        bool gone = false;
+        if (hwnd) {
+            if (!IsWindow(hwnd)) gone = true;
+            else {
+                RECT rc{};
+                int cloaked = 0;
+                DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof cloaked);
+                if (IsIconic(hwnd) || !IsWindowVisible(hwnd) || cloaked || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof rc)))
+                    snprintf(b, sizeof b, "{\"hidden\":1}\n");
+                else
+                    snprintf(b, sizeof b, "{\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld}\n", rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+            }
+        } else {
+            auto ms = listMonitors();
+            if (monitor < 0 || monitor >= (int)ms.size()) gone = true;
+            else {
+                const RECT& rc = ms[monitor].rc;
+                snprintf(b, sizeof b, "{\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld}\n", rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
+            }
+        }
+        if (gone) { fputs("{\"gone\":1}\n", stdout); fflush(stdout); return 0; }
+        if (last != b) { last = b; fputs(b, stdout); fflush(stdout); }
+        Sleep(hwnd ? 50 : 1000);
+    }
+}
+
 int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -1765,6 +1798,16 @@ int wmain(int argc, wchar_t** argv) {
             else if (a == L"--cursor") o.cursor = toUtf8(next());
         }
         return runStream(o);
+    }
+    if (cmd == L"rect") {
+        HWND hw = nullptr;
+        int mon = 0;
+        for (int i = 2; i < argc; i++) {
+            std::wstring a = argv[i];
+            if (a == L"--hwnd" && i + 1 < argc) hw = (HWND)(uintptr_t)_wtoi64(argv[++i]);
+            else if (a == L"--monitor" && i + 1 < argc) mon = _wtoi(argv[++i]);
+        }
+        return cmdRect(hw, mon);
     }
     if (cmd == L"gpus") return cmdGpus();
     if (cmd == L"hwtest") return cmdHwTest(argc > 2 ? argv[2] : L"hwtest.mp4");
