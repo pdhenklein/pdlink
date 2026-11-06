@@ -147,6 +147,11 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
     const [box, setBox] = useState<{ l: number; t: number; w: number; h: number; } | null>(null);
     const [hover, setHover] = useState(false);
     const [palette, setPalette] = useState(false);
+    const [idle, setIdle] = useState(false);
+    const [, setTick] = useState(0);
+    const idleTimer = useRef<any>(0);
+    const paletteOpen = useRef(false);
+    paletteOpen.current = palette;
     const canvas = useRef<HTMLCanvasElement>(null);
     const loop = useRef(0);
     const stroke = useRef<{ pts: [number, number][]; first: boolean; raf: number; down: boolean; } | null>(null);
@@ -204,9 +209,15 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
         if (!v) return;
         const doc = v.ownerDocument;
         let last = false;
+        // como os controles do Discord: somem depois de uns segundos sem mexer o mouse (nao somem enquanto desenha ou com a paleta aberta)
+        const arm = () => {
+            clearTimeout(idleTimer.current);
+            idleTimer.current = setTimeout(() => { if (paletteOpen.current || stroke.current) arm(); else setIdle(true); }, 3000);
+        };
         const move = (e: MouseEvent) => {
             const r = v.getBoundingClientRect();
             const inside = r.width > 0 && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+            if (inside) { setIdle(false); arm(); }
             if (inside !== last) {
                 last = inside;
                 setHover(inside);
@@ -216,7 +227,10 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
         const key = (e: KeyboardEvent) => { if (e.key === "Escape" && ui.mode !== "off") changeMode("off"); };
         // se a janela mudar de tamanho ou a tela rolar, o desenho precisa acompanhar o video
         const relayout = () => kick();
+        // em tela cheia o Discord so mostra o elemento da tela cheia (e o que estiver dentro dele): a camada tem que ir para la
+        const onFullscreen = () => { setTick(n => n + 1); relayout(); };
         const win = doc.defaultView;
+        doc.addEventListener("fullscreenchange", onFullscreen);
         doc.addEventListener("mousemove", move, { passive: true });
         doc.addEventListener("keydown", key);
         win?.addEventListener("resize", relayout);
@@ -226,13 +240,17 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
             doc.removeEventListener("keydown", key);
             win?.removeEventListener("resize", relayout);
             doc.removeEventListener("scroll", relayout, true);
+            doc.removeEventListener("fullscreenchange", onFullscreen);
+            clearTimeout(idleTimer.current);
         };
     }, []);
 
     if (!session || !allowed || !box || box.w < 120 || box.h < 70) return null;
     const v = video.current;
-    const target = v?.ownerDocument.body;
-    if (!target) return null;
+    const doc = v?.ownerDocument;
+    if (!v || !doc) return null;
+    const fs = doc.fullscreenElement as HTMLElement | null;
+    const target: HTMLElement = fs && fs !== v && fs.contains(v) ? fs : doc.body;
     const self = UserStore.getCurrentUser()?.id as string | undefined;
     const showBar = hover || active;
 
@@ -331,7 +349,8 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
                 <div
                     onClick={swallow} onDoubleClick={swallow} onMouseDown={swallow} onPointerDown={swallow} onContextMenu={swallow}
                     style={{
-                        position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)", pointerEvents: "auto",
+                        position: "absolute", top: 10, left: "50%", transform: "translateX(-50%)",
+                        pointerEvents: idle ? "none" : "auto", opacity: idle ? 0 : 1, transition: "opacity .25s",
                         display: "flex", alignItems: "center", gap: 2, padding: 4, borderRadius: 10,
                         background: "rgba(24,25,28,.92)", boxShadow: "0 4px 14px rgba(0,0,0,.45)", userSelect: "none"
                     }}

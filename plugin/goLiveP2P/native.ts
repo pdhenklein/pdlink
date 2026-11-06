@@ -19,7 +19,7 @@ const PKG_DIR = __dirname;
 const PACKAGED = existsSync(join(PKG_DIR, "golive-helper.exe"));
 const VIEWER_PAGE = PACKAGED ? join(PKG_DIR, "viewer.html") : "F:/Discord2/Vencord/src/userplugins/goLiveP2P/viewer.html";
 const WATCH_PORT = 47615;
-const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p7.exe";
+const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p8.exe";
 // relatorios de diagnostico: no pacote ficam na pasta de dados do usuario
 const PROBE_DIR = PACKAGED ? join(PKG_DIR, "..", "logs") : "F:/Discord2/probe";
 
@@ -85,7 +85,7 @@ export async function getSources(_: IpcMainInvokeEvent, q: SourcesQuery = {}) {
         }
     };
     // janelas que o seletor nativo do Discord nao mostra
-    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "whatsapp.root.exe", "whatsapp.exe"]);
+    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "golive-helper-p8.exe", "whatsapp.root.exe", "whatsapp.exe"]);
     list.windows = list.windows.filter((w: any) => !hidden.has(String(w.exe).toLowerCase()));
     const windows = list.windows.map((w: any) => ({ ...w, thumb: thumb("w" + w.hwnd), icon: icon("i" + w.hwnd) }));
     const monitors = list.monitors.map((m: any) => ({ ...m, thumb: thumb("m" + m.index) }));

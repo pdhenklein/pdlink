@@ -1,7 +1,8 @@
-import { SelectedChannelStore, UserStore, VoiceStateStore } from "@webpack/common";
+import { ChannelStore, GuildMemberStore, RelationshipStore, SelectedChannelStore, UserStore, VoiceStateStore } from "@webpack/common";
 
 import { createMarkSession, dropMarkSession, notifyMarkSessions, registerMarkSession } from "./marks";
 import { type Mark } from "./marksCore";
+import { pickName } from "./names";
 import { PluginNative } from "@utils/types";
 
 import { getLive, getLocalToken, saveProbe, takeFlag, watchBase } from "./live";
@@ -30,9 +31,21 @@ function nativeCall(name: string, ...args: any[]) {
 let overlayKey = "";
 let lastMarksAllowed: boolean | null = null;
 
+// nome da pessoa NAQUELA chamada (apelido do servidor, do grupo ou de amigo), so a primeira palavra
 function displayName(userId: string) {
-    const u: any = UserStore.getUser(userId);
-    return String(u?.globalName ?? u?.username ?? "");
+    try {
+        const u: any = UserStore.getUser(userId);
+        const ch: any = channelId ? ChannelStore.getChannel(channelId) : null;
+        const guildId: string | undefined = ch?.guild_id;
+        return pickName({
+            guildNick: guildId ? GuildMemberStore.getNick(guildId, userId) : null,
+            groupNick: ch?.nicks?.[userId],
+            friendNick: RelationshipStore.getNickname(userId),
+            globalName: u?.globalName, username: u?.username
+        }, !!guildId);
+    } catch {
+        return "";
+    }
 }
 
 // Janela transparente com as marcacoes dos espectadores, por cima da janela/tela transmitida
@@ -147,7 +160,8 @@ async function watch(userId: string) {
         handles.set(userId, h);
         h.onClosed = () => unwatch(userId);
         const session = createMarkSession(() => h.caps.marks, m => h.sendMark(m));
-        h.onMark = m => { session.board.apply(m, performance.now()); session.wake(); };
+        // o nome vem do apelido que ESTE Discord mostra para a pessoa na chamada
+        h.onMark = m => { session.board.apply({ ...m, n: m.from ? displayName(m.from) : m.n }, performance.now()); session.wake(); };
         h.onCaps = () => notifyMarkSessions();
         registerMarkSession(userId, session);
         setLiveEntry(userId, { watching: true, stream: h.stream, label: h.info.label, local: false });

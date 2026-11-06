@@ -1424,6 +1424,10 @@ static int runStream(StreamOpts o) {
 
     std::mutex mtx;
     double lastEmit = 0;
+    // ultimo quadro entregue ao codificador (para reenviar quando a janela fica parada)
+    ID3D11Texture2D* lastNv12 = nullptr;
+    LONGLONG lastNv12Ts = 0;
+    double lastSubmitAt = 0;
     const double minGap = 1.0 / o.fps - 0.002;
     wgc::Direct3D11CaptureFramePool pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(g.d3d, wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
     pool.FrameArrived([&](wgc::Direct3D11CaptureFramePool const& sender, winrt::Windows::Foundation::IInspectable const&) {
@@ -1449,7 +1453,10 @@ static int runStream(StreamOpts o) {
             LONGLONG ts = frame.SystemRelativeTime().count();
             if (firstTs < 0) firstTs = ts;
             ID3D11Texture2D* nv12 = conv.convert(g, gtex.Get(), (UINT)cs.Width, (UINT)cs.Height);
-            if (nv12) enc.submit(nv12, ts - firstTs);
+            if (nv12) {
+                lastNv12 = nv12; lastNv12Ts = ts - firstTs; lastSubmitAt = now;
+                enc.submit(nv12, ts - firstTs);
+            }
             return;
         }
         {
@@ -1562,6 +1569,26 @@ static int runStream(StreamOpts o) {
         });
     }
 
+    // O Windows so entrega quadro quando a janela muda. Janela parada = nenhum quadro novo, e quem acabou de entrar
+    // (ou pediu um quadro-chave) ficaria com a tela preta para sempre. Entao o ultimo quadro e reenviado: a cada 1 s
+    // enquanto parada, ou em ~120 ms quando alguem pediu um quadro-chave.
+    std::thread idleThread;
+    if (gpuMode) {
+        idleThread = std::thread([&] {
+            while (running) {
+                Sleep(60);
+                std::lock_guard<std::mutex> lk(mtx);
+                if (!lastNv12 || !running) continue;
+                double now = nowSec();
+                double idle = now - lastSubmitAt;
+                if (idle < (enc.forceKey.load() ? 0.12 : 1.0)) continue;
+                lastNv12Ts += (LONGLONG)(idle * 1e7);
+                lastSubmitAt = now;
+                enc.submit(lastNv12, lastNv12Ts);
+            }
+        });
+    }
+
     session.StartCapture();
     fprintf(stderr, "stream iniciado %ux%u fps=%d threads=%d\n", W, H, o.fps, o.threads);
     double lastStat = nowSec();
@@ -1584,6 +1611,7 @@ static int runStream(StreamOpts o) {
     try { pool.Close(); } catch (...) {}
     if (ct.joinable()) ct.join();
     if (at.joinable()) at.join();
+    if (idleThread.joinable()) idleThread.join();
     if (pumpThread.joinable()) {
         enc.wake();
         // se mesmo assim nao houver evento, nao trava o encerramento
