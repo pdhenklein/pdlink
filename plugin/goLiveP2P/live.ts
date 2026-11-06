@@ -318,7 +318,7 @@ class LiveController {
         try { this.audioCtx?.close(); } catch { }
         const ctx = new AudioContext({ sampleRate: rate, latencyHint: "interactive" });
         const dest = ctx.createMediaStreamDestination();
-        const node = ctx.createScriptProcessor(2048, 0, 2);
+        const node = ctx.createScriptProcessor(1024, 0, 2);
         node.onaudioprocess = ev => {
             const l = ev.outputBuffer.getChannelData(0);
             const r = ev.outputBuffer.getChannelData(1);
@@ -349,8 +349,9 @@ class LiveController {
         for (let i = 0; i < n; i++) f[i] = view.getInt16(i * 2, true) / 32768;
         this.audioQueue.push(f);
         this.audioQueued += n >> 1;
-        // limita o atraso: acima de ~300 ms descarta o mais antigo
-        while (this.audioQueued > this.audioRate * 0.3 && this.audioQueue.length > 1) {
+        // limita o atraso: o relogio do som e o do auxiliar nunca andam exatamente juntos, entao a fila cresce aos poucos;
+        // acima de ~70 ms descarta o mais antigo (medido: com 300 ms o som ficava ~0,4 s atrasado em relacao a imagem)
+        while (this.audioQueued > this.audioRate * 0.07 && this.audioQueue.length > 1) {
             this.audioQueued -= this.audioQueue.shift()!.length >> 1;
         }
     }
