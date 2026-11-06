@@ -1,0 +1,260 @@
+import { SelectedChannelStore, UserStore, VoiceStateStore } from "@webpack/common";
+
+import { getLive, getLocalToken, saveProbe, takeFlag, watchBase } from "./live";
+import { callbacks, getLiveEntry, nativeUiDiagnostics, setLiveEntry, uninstallNativeUi } from "./nativeUi";
+import { channelHash, Hub, selfTest, userHash, WatchHandle } from "./p2p";
+
+let channelId: string | null = null;
+let hub: Hub | null = null;
+let resolveTimer: any = null;
+const handles = new Map<string, WatchHandle>();
+let unsubLive: (() => void) | null = null;
+let channelListener: (() => void) | null = null;
+let lastRunning = false;
+let lastLabel = "";
+let started = false;
+let localToken = "";
+let hubError = "";
+let encoderCaps: any = null;
+let statsTimer: any = null;
+let watchUrl = "";
+
+export function getWatchUrl() {
+    return watchUrl;
+}
+
+async function buildWatchUrl() {
+    const self = me();
+    if (!channelId || !self) return "";
+    const base = await watchBase();
+    return `${base}#c=${await channelHash(channelId)}&u=${await userHash(channelId, self)}`;
+}
+
+function videoCodecs() {
+    try {
+        return [...new Set((RTCRtpSender.getCapabilities("video")?.codecs ?? []).map(c => c.mimeType + (c.sdpFmtpLine ? " [" + c.sdpFmtpLine.slice(0, 60) + "]" : "")))];
+    } catch (e) {
+        return ["erro: " + String(e)];
+    }
+}
+
+async function encoderCapabilities() {
+    const out: any = {};
+    try {
+        const mc: any = (navigator as any).mediaCapabilities;
+        for (const ct of ["video/H264", "video/VP9", "video/AV1", "video/VP8"]) {
+            try {
+                const r = await mc.encodingInfo({ type: "webrtc", video: { contentType: ct, width: 1920, height: 1080, bitrate: 8e6, framerate: 30 } });
+                out["webrtc " + ct] = { supported: r.supported, smooth: r.smooth, hardware: r.powerEfficient };
+            } catch (e) { out["webrtc " + ct] = "erro: " + String(e); }
+        }
+    } catch (e) { out.mediaCapabilities = "erro: " + String(e); }
+    try {
+        const VE: any = (window as any).VideoEncoder;
+        if (!VE) out.webcodecs = "sem VideoEncoder";
+        else {
+            for (const [name, codec] of [["h264", "avc1.640029"], ["vp9", "vp09.00.40.08"], ["av1", "av01.0.08M.08"]]) {
+                for (const hw of ["prefer-hardware", "prefer-software"]) {
+                    try {
+                        const r = await VE.isConfigSupported({ codec, width: 1920, height: 1080, bitrate: 8e6, framerate: 60, hardwareAcceleration: hw, latencyMode: "realtime" });
+                        out[`webcodecs ${name} ${hw}`] = !!r.supported;
+                    } catch (e) { out[`webcodecs ${name} ${hw}`] = "erro: " + String(e); }
+                }
+            }
+        }
+    } catch (e) { out.webcodecs = "erro: " + String(e); }
+    return out;
+}
+
+function me() {
+    return UserStore.getCurrentUser()?.id as string | undefined;
+}
+
+function others(): string[] {
+    if (!channelId) return [];
+    const self = me();
+    return Object.keys(VoiceStateStore.getVoiceStatesForChannel(channelId) ?? {}).filter(id => id !== self);
+}
+
+async function resolveUser(hash: string): Promise<string | null> {
+    if (!channelId) return null;
+    for (const id of others()) {
+        if (await userHash(channelId, id) === hash) return id;
+    }
+    return null;
+}
+
+// Traduz "quem esta ao vivo" (hashes) em pessoas da chamada e registra no HUD nativo
+async function applyPresence() {
+    const h = hub;
+    if (!h) return;
+    const seen = new Set<string>();
+    for (const [hash, info] of h.presence) {
+        const id = await resolveUser(hash);
+        if (!id) continue;
+        seen.add(id);
+        const cur = getLiveEntry(id);
+        if (!cur || cur.label !== info.label) setLiveEntry(id, { label: info.label, local: false });
+    }
+    for (const id of others()) {
+        if (seen.has(id)) continue;
+        const cur = getLiveEntry(id);
+        if (!cur) continue;
+        if (handles.has(id)) unwatch(id);
+        setLiveEntry(id, null);
+    }
+}
+
+async function watch(userId: string) {
+    const self = me();
+    if (!hub || !channelId || !self || handles.has(userId)) return;
+    try {
+        const hash = await userHash(channelId, userId);
+        const h = await hub.watch(hash, self);
+        handles.set(userId, h);
+        h.onClosed = () => unwatch(userId);
+        setLiveEntry(userId, { watching: true, stream: h.stream, label: h.info.label, local: false });
+    } catch (e) {
+        console.warn("[GoLiveP2P] nao consegui assistir", e);
+        hubError = String(e);
+    }
+}
+
+function unwatch(userId: string) {
+    const h = handles.get(userId);
+    h?.close();
+    handles.delete(userId);
+    if (getLiveEntry(userId)) setLiveEntry(userId, { watching: false, stream: undefined });
+}
+
+function teardownChannel() {
+    clearInterval(resolveTimer);
+    resolveTimer = null;
+    for (const id of [...handles.keys()]) unwatch(id);
+    hub?.stop();
+    hub = null;
+    for (const id of others()) if (getLiveEntry(id)) setLiveEntry(id, null);
+    const self = me();
+    if (self && getLiveEntry(self)) setLiveEntry(self, null);
+}
+
+async function syncChannel() {
+    const now = (SelectedChannelStore.getVoiceChannelId() as string | null) ?? null;
+    if (now === channelId) return;
+    teardownChannel();
+    channelId = now;
+    lastRunning = false;
+    if (!channelId) return;
+    const self = me();
+    if (!self) return;
+    const h = new Hub(channelId, self);
+    hub = h;
+    h.onPresence = () => { applyPresence(); };
+    h.onViewers = ids => setLiveEntry(self, { viewers: ids });
+    // so assiste quem o Discord mostra na mesma chamada agora (ou a pagina de teste aberta neste PC)
+    h.isAllowedViewer = m => {
+        if (m?.userId && m.userId !== self && others().includes(m.userId)) return true;
+        return !!m?.localToken && !!localToken && m.localToken === localToken;
+    };
+    resolveTimer = setInterval(applyPresence, 5000);
+    try {
+        await h.connect();
+        hubError = "";
+        syncLive();
+    } catch (e) {
+        hubError = String(e);
+        console.warn("[GoLiveP2P] ponto de encontro indisponivel", e);
+    }
+}
+
+function syncLive() {
+    const live = getLive();
+    const self = me();
+    if (!self || !channelId || !hub) return;
+    const label = live.source?.label ?? "";
+    if (live.running === lastRunning && label === lastLabel) {
+        if (live.running) hub.updateBroadcast();
+        return;
+    }
+    const startedNow = live.running && !lastRunning;
+    lastRunning = live.running;
+    lastLabel = label;
+    if (live.running) {
+        buildWatchUrl().then(u => { watchUrl = u; saveProbe("watch-url.txt", u); }).catch(() => { });
+        setLiveEntry(self, { local: true, watching: true, label });
+        hub.startBroadcast(
+            () => ({ label: live.source?.label ?? "Live", fps: live.prefs.fps, maxH: live.prefs.maxH }),
+            () => live.getVideoTrack(),
+            () => (live.prefs.muteAudio ? null : live.getAudioTrack()),
+            cb => live.addFrameSink(cb),
+            {
+                active: () => live.videoMode === "h264",
+                config: () => live.videoConfig,
+                onChunk: cb => live.addEncodedSink(cb),
+                onConfig: cb => live.addConfigSink(cb),
+                requestKey: () => live.requestKeyFrame()
+            }
+        );
+    } else {
+        hub.stopBroadcast();
+        watchUrl = "";
+        if (getLiveEntry(self)) setLiveEntry(self, null);
+    }
+    if (live.running && !encoderCaps) encoderCapabilities().then(c => { encoderCaps = c; });
+    if (live.running && !statsTimer) {
+        statsTimer = setInterval(async () => {
+            if (!hub || !getLive().running) return;
+            try {
+                const rows = await hub.stats();
+                if (rows.length) await saveProbe("webrtc-stats.json", JSON.stringify({ at: new Date().toISOString(), rows, audio: getLive().audioState(), perf: getLive().perf, video: { modo: getLive().videoMode, config: getLive().videoConfig, codificador: getLive().encoderName }, codecs: videoCodecs(), encoderCaps }, null, 1));
+            } catch { }
+        }, 5000);
+    } else if (!live.running && statsTimer) {
+        clearInterval(statsTimer);
+        statsTimer = null;
+    }
+    if (startedNow) {
+        for (const ms of [2500, 9000]) {
+            setTimeout(() => {
+                try {
+                    saveProbe("status-" + ms + ".json", JSON.stringify({ ...nativeUiDiagnostics(), broker: hub?.brokerUsed, hubError, hubPresence: hub ? [...hub.presence.keys()] : [] }, null, 1));
+                } catch { }
+            }, ms);
+        }
+    }
+}
+
+export function startManager() {
+    if (started) return;
+    started = true;
+    getLocalToken().then(t => { localToken = t; }).catch(() => { });
+    callbacks.watch = userId => { watch(userId); };
+    callbacks.unwatch = userId => unwatch(userId);
+    unsubLive = getLive().subscribe(syncLive);
+    channelListener = () => { syncChannel().catch(e => console.error("[GoLiveP2P]", e)); };
+    (SelectedChannelStore as any).addChangeListener(channelListener);
+    // o plugin pode iniciar com o usuario ja numa chamada
+    setTimeout(channelListener, 3000);
+
+    // autoteste de ponta a ponta, so quando pedido por arquivo-bandeira
+    setTimeout(async () => {
+        try {
+            if (await takeFlag("selftest")) {
+                const r = await selfTest();
+                await saveProbe("selftest.json", JSON.stringify(r, null, 1));
+            }
+        } catch (e) {
+            await saveProbe("selftest.json", JSON.stringify({ ok: false, error: String(e) }));
+        }
+    }, 6000);
+}
+
+export function stopManager() {
+    if (!started) return;
+    started = false;
+    unsubLive?.();
+    (SelectedChannelStore as any).removeChangeListener(channelListener);
+    teardownChannel();
+    channelId = null;
+    uninstallNativeUi();
+}

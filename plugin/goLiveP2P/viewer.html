@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Assistir live</title>
+<style>
+    :root { color-scheme: dark; }
+    html, body { margin: 0; height: 100%; background: #000; color: #dbdee1; font: 14px system-ui, "Segoe UI", sans-serif; }
+    #stage { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+    video { width: 100%; height: 100%; object-fit: contain; background: #000; }
+    #msg { position: absolute; text-align: center; padding: 24px; max-width: 520px; line-height: 1.5; }
+    #msg h1 { font-size: 20px; margin: 0 0 8px; color: #fff; }
+    #msg.hidden { display: none; }
+    #bar { position: fixed; left: 12px; bottom: 12px; display: flex; gap: 8px; align-items: center; background: rgba(30,31,34,.85); padding: 6px 10px; border-radius: 8px; font-size: 12px; }
+    #bar .live { background: #ed4245; color: #fff; font-weight: 700; padding: 2px 6px; border-radius: 4px; letter-spacing: .03em; }
+    #bar button { background: #35373c; color: #fff; border: 0; border-radius: 4px; padding: 4px 8px; cursor: pointer; font: inherit; }
+    #bar.hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="stage">
+    <canvas id="cv" style="display:none;width:100%;height:100%;object-fit:contain;background:#000"></canvas>
+    <video id="v" autoplay playsinline muted></video>
+    <div id="msg"><h1>Assistir live</h1><div id="txt">Conectando...</div><div id="diag" style="margin-top:14px;font-size:12px;opacity:.7"></div></div>
+</div>
+<div id="bar" class="hidden">
+    <span class="live">AO VIVO</span>
+    <span id="stats"></span>
+    <span id="dbg" style="opacity:.7"></span>
+    <button id="mute">Ativar som</button>
+    <button id="full">Tela cheia</button>
+</div>
+<script src="/viewer-hw.js"></script>
+<script>
+(function () {
+    const BROKERS = ["wss://broker.emqx.io:8084/mqtt", "wss://broker.hivemq.com:8884/mqtt"];
+    const ICE = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
+    const $ = id => document.getElementById(id);
+    const say = (t, title) => { $("msg").classList.remove("hidden"); $("txt").textContent = t; if (title) $("msg").querySelector("h1").textContent = title; };
+    const rand = () => Array.from(crypto.getRandomValues(new Uint8Array(8)), b => b.toString(16).padStart(2, "0")).join("");
+
+    // ---------------- cliente MQTT 3.1.1 minimo (QoS 0), mesmo do plugin
+    const enc = new TextEncoder(), dec = new TextDecoder();
+    const varint = n => { const o = []; do { let b = n % 128; n = Math.floor(n / 128); if (n > 0) b |= 128; o.push(b); } while (n > 0); return o; };
+    const str = s => { const b = enc.encode(s); return [b.length >> 8, b.length & 255, ...b]; };
+    const packet = (h, body) => { const a = Array.from(body); return new Uint8Array([h, ...varint(a.length), ...a]); };
+    function Mqtt() {
+        let ws, buf = new Uint8Array(0), ping, subs = [], pid = 1;
+        const self = {
+            onClose() {},
+            connect(url, clientId) {
+                return new Promise((resolve, reject) => {
+                    ws = new WebSocket(url, "mqtt"); ws.binaryType = "arraybuffer";
+                    const timer = setTimeout(() => { reject(new Error("tempo esgotado")); try { ws.close(); } catch (e) {} }, 8000);
+                    ws.onopen = () => ws.send(packet(0x10, [...str("MQTT"), 4, 2, 0, 30, ...str(clientId)]));
+                    ws.onerror = () => { clearTimeout(timer); reject(new Error("nao conectou")); };
+                    ws.onclose = () => { clearInterval(ping); self.onClose(); };
+                    ws.onmessage = ev => {
+                        const c = new Uint8Array(ev.data), j = new Uint8Array(buf.length + c.length); j.set(buf); j.set(c, buf.length); buf = j;
+                        for (;;) {
+                            if (buf.length < 2) return;
+                            let len = 0, mul = 1, i = 1, b;
+                            do { if (i >= buf.length) return; b = buf[i++]; len += (b & 127) * mul; mul *= 128; } while (b & 128);
+                            if (buf.length < i + len) return;
+                            const h = buf[0], body = buf.slice(i, i + len); buf = buf.slice(i + len);
+                            const type = h >> 4;
+                            if (type === 2) { clearTimeout(timer); if (body[1] === 0) { ping = setInterval(() => raw(new Uint8Array([0xC0, 0])), 20000); resolve(); } else reject(new Error("recusado")); }
+                            else if (type === 3) {
+                                const tl = (body[0] << 8) | body[1], topic = dec.decode(body.slice(2, 2 + tl));
+                                let off = 2 + tl; if (((h >> 1) & 3) > 0) off += 2;
+                                const payload = dec.decode(body.slice(off));
+                                subs.forEach(s => { if (match(s.f, topic)) s.cb(topic, payload); });
+                            }
+                        }
+                    };
+                });
+            },
+            subscribe(f, cb) { subs.push({ f, cb }); const id = pid++ & 0xffff; raw(packet(0x82, [id >> 8, id & 255, ...str(f), 0])); },
+            publish(t, p, retain) { raw(packet(0x30 | (retain ? 1 : 0), [...str(t), ...enc.encode(p)])); },
+            close() { clearInterval(ping); try { raw(new Uint8Array([0xE0, 0])); ws.close(); } catch (e) {} }
+        };
+        const raw = p => { if (ws && ws.readyState === 1) ws.send(p); };
+        const match = (f, t) => { const a = f.split("/"), b = t.split("/"); for (let i = 0; i < a.length; i++) { if (a[i] === "#") return true; if (i >= b.length) return false; if (a[i] !== "+" && a[i] !== b[i]) return false; } return a.length === b.length; };
+        return self;
+    }
+
+    // ---------------- logica do espectador
+    const p = new URLSearchParams(location.hash.slice(1));
+    const ch = p.get("c"), user = p.get("u");
+    if (!ch || !user) { say("Este link esta incompleto.", "Link invalido"); return; }
+    const presenceTopic = "glp/v1/" + ch + "/live/" + user;
+
+    const video = $("v");
+    let mqtt, pc, connected = false, inbox, myInbox, lastBytes = 0, lastT = 0;
+
+    async function open() {
+        let err;
+        for (const url of BROKERS) {
+            const m = Mqtt();
+            try { await m.connect(url, "glw" + rand()); return m; } catch (e) { err = e; m.close(); }
+        }
+        throw err || new Error("nenhum servidor de encontro respondeu");
+    }
+
+    let noH264 = p.get("codec") === "vp8";
+    let noHw = p.get("hw") === "0";
+    let statsTimer = null, watchdog = null, hwState = null, attempt = 0;
+
+    function dbg(t) { const e = $("dbg"); if (e) e.textContent = t; }
+
+    function teardown() {
+        clearInterval(statsTimer); clearTimeout(watchdog);
+        if (hwState) { try { hwState.painter.stop(); hwState.dec.close(); } catch (e) {} hwState = null; }
+        try { pc && pc.close(); } catch (e) {}
+        pc = null; connected = false;
+        $("cv").style.display = "none"; video.style.display = "";
+    }
+
+    async function connect(info) {
+        if (connected) return;
+        connected = true;
+        attempt++;
+        say("Conectando com quem esta transmitindo..." + (noHw || noH264 ? " (modo compativel)" : ""), "Assistir live");
+        const id = "w" + rand();
+        const myPc = new RTCPeerConnection(ICE);
+        pc = myPc;
+        const vt = myPc.addTransceiver("video", { direction: "recvonly" });
+        myPc.addTransceiver("audio", { direction: "recvonly" });
+        if (noH264) {
+            try {
+                const caps = RTCRtpReceiver.getCapabilities("video").codecs.filter(c => !/h264/i.test(c.mimeType));
+                vt.setCodecPreferences(caps);
+            } catch (e) { dbg("nao consegui tirar o H.264: " + e.message); }
+        }
+
+        // video por hardware: chega pelo canal de dados e e decodificado pela placa de video
+        const hwOk = !!(window.HW && typeof VideoDecoder === "function" && !noHw);
+        let mode = "rtp";
+        if (hwOk) {
+            const dcv = myPc.createDataChannel("v", { ordered: true });
+            dcv.binaryType = "arraybuffer";
+            const dec = new HW.HwDecoder(), recv = new HW.FrameReceiver(), painter = new HW.LatestFramePainter($("cv"));
+            hwState = { dec, recv, painter, active: false };
+            dec.onFrame = f => painter.push(f);
+            dec.onNeedKey = () => { try { dcv.send(JSON.stringify({ t: "key" })); } catch (e) {} };
+            recv.onFrame = (k, ts, d) => dec.push(k, ts, d);
+            dcv.onmessage = ev => {
+                if (typeof ev.data === "string") {
+                    try {
+                        const o = JSON.parse(ev.data);
+                        if (o.t === "cfg") dec.configure(o).then(() => { dbg("decodificador: " + (dec.hardware ? "placa de video" : "software")); dec.onNeedKey(); }).catch(e => dbg("decodificador: " + e.message));
+                    } catch (e) {}
+                } else recv.push(ev.data);
+            };
+        }
+
+        let answered = false;
+        const cands = { host: 0, srflx: 0, relay: 0, other: 0 };
+        const stream = new MediaStream();
+        myPc.ontrack = ev => {
+            if (ev.track.kind === "video" && mode === "dc") return;
+            stream.addTrack(ev.track); video.srcObject = stream; video.play().catch(() => {});
+        };
+        myPc.onicecandidate = ev => {
+            if (!ev.candidate) return;
+            const t = ev.candidate.type || (ev.candidate.candidate.split(" typ ")[1] || "other").split(" ")[0];
+            cands[t in cands ? t : "other"]++;
+            send({ type: "CANDIDATE", connectionId: id, candidate: ev.candidate.toJSON() });
+        };
+        myPc.oniceconnectionstatechange = () => dbg("rede: " + myPc.iceConnectionState);
+        myPc.onconnectionstatechange = () => {
+            if (myPc !== pc) return;
+            if (myPc.connectionState === "connected") { $("msg").classList.add("hidden"); $("bar").classList.remove("hidden"); }
+            if (["failed", "closed", "disconnected"].includes(myPc.connectionState)) {
+                $("bar").classList.add("hidden");
+                say("A live terminou ou a conexao caiu. Esperando ela voltar...", "Desconectado");
+                teardown();
+            }
+        };
+        mqtt.subscribe(myInbox, (_t, payload) => {
+            let m; try { m = JSON.parse(payload); } catch (e) { return; }
+            if (m.connectionId !== id) return;
+            if (m.type === "ANSWER" && m.denied) {
+                say("Esta live so pode ser vista por quem esta na mesma chamada do Discord.", "Sem permissao");
+                teardown();
+                return;
+            }
+            if (m.type === "ANSWER") {
+                answered = true;
+                mode = (m.info && m.info.mode) || "rtp";
+                if (mode === "dc" && hwState) { hwState.active = true; $("cv").style.display = "block"; video.style.display = "none"; }
+                myPc.setRemoteDescription({ type: "answer", sdp: m.sdp }).catch(e => dbg("resposta recusada: " + e.message));
+            } else if (m.type === "CANDIDATE" && m.candidate) myPc.addIceCandidate(m.candidate).catch(() => {});
+        });
+        const send = msg => mqtt.publish(info.inbox, JSON.stringify(Object.assign({ from: myInbox }, msg)));
+        const offer = await myPc.createOffer();
+        await myPc.setLocalDescription(offer);
+        send({ type: "OFFER", connectionId: id, sdp: offer.sdp, hw: hwOk, localToken: "__GLV_LOCAL_TOKEN__" });
+        setTimeout(() => {
+            if (myPc !== pc || myPc.connectionState === "connected") return;
+            say("A conexao com a live nao fechou.", "Sem resposta");
+            $("diag").textContent = "resposta da live: " + (answered ? "sim" : "nao") + " | rede: " + myPc.iceConnectionState
+                + " | seus enderecos locais: " + cands.host + " | via servidor STUN: " + cands.srflx + " | retransmissao: " + cands.relay
+                + (cands.host === 0 ? " | AVISO: o navegador escondeu os enderecos locais (VPN ou protecao de WebRTC)" : "");
+        }, 20000);
+        statsTimer = setInterval(stats, 1000);
+
+        // Se conectou mas nao aparece imagem (codec/decodificador indisponivel), tenta de novo em modo compativel.
+        watchdog = setTimeout(async () => {
+            if (myPc !== pc || myPc.connectionState !== "connected") return;
+            if (mode === "dc") {
+                if (hwState && hwState.painter.painted === 0 && !noHw) {
+                    noHw = true;
+                    dbg("sem imagem pelo hardware; tentando modo compativel");
+                    teardown(); connect(info);
+                }
+                return;
+            }
+            if (noH264) return;
+            let decoded = 0, bytes = 0;
+            (await myPc.getStats()).forEach(s => { if (s.type === "inbound-rtp" && s.kind === "video") { decoded = s.framesDecoded || 0; bytes = s.bytesReceived || 0; } });
+            if (decoded === 0) {
+                noH264 = true;
+                dbg("sem imagem com H.264 (" + bytes + " bytes); tentando modo compativel");
+                teardown(); connect(info);
+            }
+        }, 8000);
+    }
+
+    const samples = [];
+    async function stats() {
+        if (!pc || pc.connectionState !== "connected") return;
+        const now = performance.now();
+        if (hwState && hwState.active) {
+            samples.push({ t: now, bytes: hwState.recv.bytes, frames: hwState.painter.painted });
+            while (samples.length > 4) samples.shift();
+            const a = samples[0], z = samples[samples.length - 1], dt = z.t - a.t;
+            const kbps = dt > 0 ? Math.round((z.bytes - a.bytes) * 8 / dt) : 0;
+            const fps = dt > 0 ? Math.round((z.frames - a.frames) * 1000 / dt) : 0;
+            const c = $("cv");
+            $("stats").textContent = c.width + "x" + c.height + " | " + fps + " fps | " + kbps + " kbps";
+            return;
+        }
+        const r = await pc.getStats();
+        r.forEach(s => {
+            if (s.type === "inbound-rtp" && s.kind === "video") {
+                samples.push({ t: now, bytes: s.bytesReceived || 0, frames: s.framesDecoded || 0 });
+                while (samples.length > 4) samples.shift();
+                const a = samples[0], z = samples[samples.length - 1], dt = z.t - a.t;
+                const kbps = dt > 0 ? Math.round((z.bytes - a.bytes) * 8 / dt) : 0;
+                const fps = dt > 0 ? Math.round((z.frames - a.frames) * 1000 / dt) : 0;
+                const size = (s.frameWidth || video.videoWidth) + "x" + (s.frameHeight || video.videoHeight);
+                $("stats").textContent = size + " | " + (isFinite(fps) ? fps : 0) + " fps | " + (isFinite(kbps) ? kbps : 0) + " kbps";
+            }
+            if (s.type === "inbound-rtp" && s.kind === "audio") window.__audioBytes = s.bytesReceived;
+        });
+    }
+
+    $("mute").onclick = () => { video.muted = !video.muted; $("mute").textContent = video.muted ? "Ativar som" : "Silenciar"; };
+    $("full").onclick = () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen(); };
+
+    (async () => {
+        try {
+            say("Procurando a live...", "Assistir live");
+            mqtt = await open();
+            myInbox = "glp/v1/w/in" + rand();
+            mqtt.subscribe(presenceTopic, (_t, payload) => {
+                let info = null;
+                try { info = payload ? JSON.parse(payload) : null; } catch (e) { return; }
+                // presenca velha = a live caiu sem avisar
+                if (!info || (info.at && Date.now() - info.at > 90000)) {
+                    if (!connected) say("Esta pessoa nao esta ao vivo agora. Esta pagina conecta sozinha assim que ela comecar.", "Aguardando");
+                    return;
+                }
+                connect(info);
+            });
+            setTimeout(() => { if (!connected) say("Esta pessoa nao esta ao vivo agora. Esta pagina conecta sozinha assim que ela comecar.", "Aguardando"); }, 4000);
+        } catch (e) {
+            say("Nao consegui falar com o servidor de encontro: " + e.message, "Sem conexao");
+        }
+    })();
+})();
+</script>
+</body>
+</html>
