@@ -1,5 +1,9 @@
 import { SelectedChannelStore, UserStore, VoiceStateStore } from "@webpack/common";
 
+import { createMarkSession, dropMarkSession, notifyMarkSessions, registerMarkSession } from "./marks";
+import { type Mark } from "./marksCore";
+import { PluginNative } from "@utils/types";
+
 import { getLive, getLocalToken, saveProbe, takeFlag, watchBase } from "./live";
 import { callbacks, getLiveEntry, nativeUiDiagnostics, setLiveEntry, uninstallNativeUi } from "./nativeUi";
 import { channelHash, Hub, selfTest, userHash, WatchHandle } from "./p2p";
@@ -18,6 +22,35 @@ let hubError = "";
 let encoderCaps: any = null;
 let statsTimer: any = null;
 let watchUrl = "";
+const Native = VencordNative.pluginHelpers.GoLiveP2P as PluginNative<typeof import("./native")>;
+// funcoes novas do lado nativo so existem depois de reiniciar o Discord; ate la, ignorar sem quebrar nada
+function nativeCall(name: string, ...args: any[]) {
+    try { (Native as any)[name]?.(...args)?.catch?.(() => { }); } catch { }
+}
+let overlayKey = "";
+let lastMarksAllowed: boolean | null = null;
+
+function displayName(userId: string) {
+    const u: any = UserStore.getUser(userId);
+    return String(u?.globalName ?? u?.username ?? "");
+}
+
+// Janela transparente com as marcacoes dos espectadores, por cima da janela/tela transmitida
+function syncOverlay() {
+    const live = getLive();
+    const src = live.source;
+    const wanted = live.running && live.prefs.allowMarks && !!src && src.kind !== "camera";
+    const key = wanted ? `${src!.kind}:${src!.kind === "window" ? src!.hwnd : src!.monitor}` : "";
+    if (key !== overlayKey) {
+        overlayKey = key;
+        if (!key) nativeCall("overlayStop");
+        else nativeCall("overlayStart", src!.kind === "window" ? { hwnd: src!.hwnd } : { monitor: src!.monitor });
+    }
+    if (hub && lastMarksAllowed !== wanted) {
+        lastMarksAllowed = wanted;
+        hub.setMarksAllowed(wanted);
+    }
+}
 
 export function getWatchUrl() {
     return watchUrl;
@@ -113,6 +146,10 @@ async function watch(userId: string) {
         const h = await hub.watch(hash, self);
         handles.set(userId, h);
         h.onClosed = () => unwatch(userId);
+        const session = createMarkSession(() => h.caps.marks, m => h.sendMark(m));
+        h.onMark = m => { session.board.apply(m, performance.now()); session.wake(); };
+        h.onCaps = () => notifyMarkSessions();
+        registerMarkSession(userId, session);
         setLiveEntry(userId, { watching: true, stream: h.stream, label: h.info.label, local: false });
     } catch (e) {
         console.warn("[GoLiveP2P] nao consegui assistir", e);
@@ -121,6 +158,7 @@ async function watch(userId: string) {
 }
 
 function unwatch(userId: string) {
+    dropMarkSession(userId);
     const h = handles.get(userId);
     h?.close();
     handles.delete(userId);
@@ -128,6 +166,9 @@ function unwatch(userId: string) {
 }
 
 function teardownChannel() {
+    overlayKey = "";
+    lastMarksAllowed = null;
+    nativeCall("overlayStop");
     clearInterval(resolveTimer);
     resolveTimer = null;
     for (const id of [...handles.keys()]) unwatch(id);
@@ -151,6 +192,8 @@ async function syncChannel() {
     hub = h;
     h.onPresence = () => { applyPresence(); };
     h.onViewers = ids => setLiveEntry(self, { viewers: ids });
+    h.nameOf = displayName;
+    h.onMark = (_uid, m: Mark) => nativeCall("overlayMark", JSON.stringify(m));
     // so assiste quem o Discord mostra na mesma chamada agora (ou a pagina de teste aberta neste PC)
     h.isAllowedViewer = m => {
         if (m?.userId && m.userId !== self && others().includes(m.userId)) return true;
@@ -171,6 +214,7 @@ function syncLive() {
     const live = getLive();
     const self = me();
     if (!self || !channelId || !hub) return;
+    syncOverlay();
     const label = live.source?.label ?? "";
     if (live.running === lastRunning && label === lastLabel) {
         if (live.running) hub.updateBroadcast();

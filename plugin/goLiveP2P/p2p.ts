@@ -1,4 +1,5 @@
 import { FrameReceiver, HwDecoder, HwEncoder, LatestFramePainter, sendFrame } from "./hwvideo";
+import { Mark, sanitizeMark } from "./marksCore";
 import { MqttClient } from "./mqtt";
 
 // Brokers MQTT publicos, usados so para sinalizacao (textos de conexao e "quem esta ao vivo").
@@ -126,6 +127,12 @@ export interface EncodedSource {
 }
 
 export interface WatchHandle {
+    /** O transmissor aceita marcacoes (ping e desenho) dos espectadores? */
+    caps: { marks: boolean; };
+    onCaps?: () => void;
+    /** Marcacao de outro espectador (repassada pelo transmissor), ja com `from` e `n`. */
+    onMark?: (m: Mark) => void;
+    sendMark(m: Mark): void;
     stream: MediaStream;
     mode?: string;
     stats?: () => any;
@@ -156,6 +163,7 @@ export class Hub {
     private negotiations = new Map<string, any>();
     private encoder: HwEncoder | null = null;
     private dcs = new Set<RTCDataChannel>();
+    private markChans = new Map<RTCDataChannel, string>();
     private waitKey = new WeakSet<RTCDataChannel>();
     private attachSource: ((cb: (c: HTMLCanvasElement) => void) => () => void) | null = null;
     private sinkOff: (() => void) | null = null;
@@ -174,6 +182,11 @@ export class Hub {
     isAllowedViewer: (offer: any) => boolean = () => false;
     deniedCount = 0;
     error = "";
+    /** Marcacao recebida de um espectador (para desenhar na tela de quem transmite). */
+    onMark: (userId: string, m: Mark) => void = () => { };
+    /** Nome para exibir junto da marcacao. */
+    nameOf: (userId: string) => string = () => "";
+    private marksAllowed = true;
 
     constructor(private channelId: string, private myUserId: string) { }
 
@@ -389,6 +402,47 @@ export class Hub {
         };
     }
 
+    // ---------------------------------------------------------- marcacoes (ping e desenho)
+
+    setMarksAllowed(on: boolean) {
+        this.marksAllowed = on;
+        const text = JSON.stringify({ t: "caps", marks: on });
+        for (const dc of this.markChans.keys()) if (dc.readyState === "open") { try { dc.send(text); } catch { } }
+    }
+
+    private onMarkChannel(dc: RTCDataChannel, userId?: string) {
+        let windowStart = 0, inWindow = 0;
+        dc.onopen = () => {
+            this.markChans.set(dc, userId ?? "");
+            try { dc.send(JSON.stringify({ t: "caps", marks: this.marksAllowed })); } catch { }
+        };
+        dc.onmessage = ev => {
+            if (!this.marksAllowed || !userId || typeof ev.data !== "string" || ev.data.length > 8192) return;
+            // no maximo ~150 mensagens por segundo por espectador
+            const now = performance.now();
+            if (now - windowStart > 1000) { windowStart = now; inWindow = 0; }
+            if (++inWindow > 150) return;
+            let raw: any;
+            try { raw = JSON.parse(ev.data); } catch { return; }
+            const clean = sanitizeMark(raw);
+            if (!clean) return;
+            const stamped: Mark = { ...clean, from: userId, n: this.nameOf(userId).slice(0, 32) };
+            this.onMark(userId, stamped);
+            const text = JSON.stringify(stamped);
+            for (const [other] of this.markChans) {
+                if (other !== dc && other.readyState === "open") { try { other.send(text); } catch { } }
+            }
+        };
+        dc.onclose = () => {
+            if (!this.markChans.delete(dc) || !userId) return;
+            // quem saiu leva o desenho embora
+            const bye: Mark = { t: "clear", from: userId };
+            this.onMark(userId, bye);
+            const text = JSON.stringify(bye);
+            for (const other of this.markChans.keys()) if (other.readyState === "open") { try { other.send(text); } catch { } }
+        };
+    }
+
     private async acceptOffer(m: any) {
         if (!this.getTrack || !this.getInfo || this.conns.size >= MAX_VIEWERS) return;
         if (!this.isAllowedViewer(m)) {
@@ -408,7 +462,10 @@ export class Hub {
             else this.onViewers(this.viewers());
         };
         const useHw = !!m.hw && HwEncoder.available();
-        if (useHw) pc.ondatachannel = ev => this.onDataChannel(ev.channel);
+        pc.ondatachannel = ev => {
+            if (ev.channel.label === "m") this.onMarkChannel(ev.channel, m.userId);
+            else if (useHw) this.onDataChannel(ev.channel);
+        };
         await pc.setRemoteDescription({ type: "offer", sdp: useHw ? m.sdp : boostSdp(reorderVideoCodecs(m.sdp), this.getInfo()) });
         const track = this.getTrack();
         const neg: any = { offer: (m.sdp.split("\r\n").find((l: string) => l.startsWith("m=video")) ?? "").slice(0, 120) };
@@ -513,6 +570,8 @@ export class Hub {
         pc.addTransceiver("video", { direction: "recvonly" });
         pc.addTransceiver("audio", { direction: "recvonly" });
         const stream = new MediaStream();
+        // canal proprio das marcacoes: pacotes pequenos, sem esperar atras do video
+        const mdc = pc.createDataChannel("m", { ordered: true });
         let mode = "rtp";
 
         // caminho por hardware: video chega pelo canal de dados e e decodificado pela placa de video
@@ -570,6 +629,8 @@ export class Hub {
         });
 
         const handle: WatchHandle = {
+            caps: { marks: false },
+            sendMark: m => { if (mdc.readyState === "open") { try { mdc.send(JSON.stringify(m)); } catch { } } },
             stream, info, mode,
             stats: () => ({ mode, decoded: dec.decoded, painted: painter.painted, hardwareDecode: dec.hardware, erro: dec.error, bytes: recv.bytes }),
             close: () => {
@@ -579,6 +640,19 @@ export class Hub {
                 dec.close();
                 try { pc.close(); } catch { }
             }
+        };
+        mdc.onmessage = ev => {
+            if (typeof ev.data !== "string" || ev.data.length > 8192) return;
+            let raw: any;
+            try { raw = JSON.parse(ev.data); } catch { return; }
+            if (raw?.t === "caps") {
+                handle.caps.marks = !!raw.marks;
+                handle.onCaps?.();
+                return;
+            }
+            const clean = sanitizeMark(raw);
+            if (!clean || typeof raw.from !== "string") return;
+            handle.onMark?.({ ...clean, from: raw.from.slice(0, 32), n: typeof raw.n === "string" ? raw.n.slice(0, 32) : "" });
         };
         pc.onconnectionstatechange = () => {
             if (["failed", "closed", "disconnected"].includes(pc.connectionState)) handle.onClosed?.();

@@ -7,6 +7,8 @@ import { createServer, Server, ServerResponse } from "http";
 import { tmpdir } from "os";
 import { join } from "path";
 
+import { overlayInfo, sendOverlay, startOverlay, stopOverlay } from "./overlay";
+
 // Brokers MQTT publicos usados so para sinalizacao (textos de conexao e quem esta ao vivo); o video nunca passa por la
 CspPolicies["wss://broker.emqx.io:8084"] = ConnectSrc;
 CspPolicies["wss://broker.hivemq.com:8884"] = ConnectSrc;
@@ -17,7 +19,7 @@ const PKG_DIR = __dirname;
 const PACKAGED = existsSync(join(PKG_DIR, "golive-helper.exe"));
 const VIEWER_PAGE = PACKAGED ? join(PKG_DIR, "viewer.html") : "F:/Discord2/Vencord/src/userplugins/goLiveP2P/viewer.html";
 const WATCH_PORT = 47615;
-const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p6.exe";
+const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p7.exe";
 // relatorios de diagnostico: no pacote ficam na pasta de dados do usuario
 const PROBE_DIR = PACKAGED ? join(PKG_DIR, "..", "logs") : "F:/Discord2/probe";
 
@@ -83,7 +85,7 @@ export async function getSources(_: IpcMainInvokeEvent, q: SourcesQuery = {}) {
         }
     };
     // janelas que o seletor nativo do Discord nao mostra
-    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "whatsapp.root.exe", "whatsapp.exe"]);
+    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "whatsapp.root.exe", "whatsapp.exe"]);
     list.windows = list.windows.filter((w: any) => !hidden.has(String(w.exe).toLowerCase()));
     const windows = list.windows.map((w: any) => ({ ...w, thumb: thumb("w" + w.hwnd), icon: icon("i" + w.hwnd) }));
     const monitors = list.monitors.map((m: any) => ({ ...m, thumb: thumb("m" + m.index) }));
@@ -203,7 +205,25 @@ export function status(_: IpcMainInvokeEvent) {
     return { running: !!helper, lastError, lastStat, clients: clients.size };
 }
 
+// Marcacoes dos espectadores (ping e desenho) desenhadas por cima da janela transmitida
+export function overlayStart(_: IpcMainInvokeEvent, src: { hwnd?: number; monitor?: number; }) {
+    startOverlay(HELPER, src);
+}
+
+export function overlayMark(_: IpcMainInvokeEvent, json: string) {
+    try { sendOverlay(JSON.parse(json)); } catch { }
+}
+
+export function overlayStop(_: IpcMainInvokeEvent) {
+    stopOverlay();
+}
+
+export function overlayStatus(_: IpcMainInvokeEvent) {
+    return overlayInfo();
+}
+
 app.on("before-quit", () => {
+    stopOverlay();
     killHelper();
     for (const c of clients) { try { c.end(); } catch { } }
     server?.close();

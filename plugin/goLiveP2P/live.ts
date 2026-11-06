@@ -15,6 +15,8 @@ export interface Prefs {
     fps: number;
     muteAudio: boolean;
     cursor: CursorMode;
+    /** Espectadores podem apontar (ping) e desenhar na minha tela. */
+    allowMarks: boolean;
 }
 
 export const PRESETS: Record<Exclude<Preset, "custom">, { maxH: number; fps: number; }> = {
@@ -48,7 +50,7 @@ class LiveController {
 
     running = false;
     source: LiveSource | null = null;
-    prefs: Prefs = { preset: "custom", maxH: 1080, fps: 60, muteAudio: false, cursor: "follow" };
+    prefs: Prefs = { preset: "custom", maxH: 1080, fps: 60, muteAudio: false, cursor: "follow", allowMarks: true };
     private selfDispatching = false;
     frameCount = 0;
     realFps = 0;

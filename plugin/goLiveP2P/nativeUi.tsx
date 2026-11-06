@@ -2,6 +2,7 @@ import { findByProps, findStore } from "@webpack";
 import { ChannelStore, FluxDispatcher, SelectedChannelStore, UserStore, useEffect, useRef } from "@webpack/common";
 
 import { getLive } from "./live";
+import { MarkLayer } from "./marks";
 
 // Faz o Discord "enxergar" as lives (a nossa e as dos amigos que usam o plugin) como transmissoes
 // dele, so localmente: as lojas devolvem a transmissao e o Discord desenha sozinho o quadro na grade,
@@ -155,7 +156,13 @@ function P2PVideo(props: any) {
             v.srcObject = null;
         };
     }, [streamId]);
-    return <video ref={ref} className={className} muted={streamId === LOCAL_VIDEO_ID} playsInline autoPlay />;
+    const remote = typeof streamId === "string" && streamId.startsWith(REMOTE_PREFIX);
+    return (
+        <>
+            <video ref={ref} className={className} muted={streamId === LOCAL_VIDEO_ID} playsInline autoPlay />
+            {remote && <MarkLayer video={ref} ownerId={String(streamId).slice(REMOTE_PREFIX.length)} />}
+        </>
+    );
 }
 
 const wrappedVideo = new WeakMap<object, any>();

@@ -178,6 +178,11 @@ function GearMenu() {
                     checked={p.muteAudio}
                     action={() => live.setPrefs({ muteAudio: !p.muteAudio })}
                 />
+                <Menu.MenuCheckboxItem
+                    id="golive-marks" label="Permitir ping e desenho dos espectadores"
+                    checked={p.allowMarks}
+                    action={() => live.setPrefs({ allowMarks: !p.allowMarks })}
+                />
                 <Menu.MenuItem id="golive-advanced" label="Avançado">
                     <Menu.MenuGroup label="Cursor na transmissão">
                         {CURSOR_OPTIONS.map(o => (
