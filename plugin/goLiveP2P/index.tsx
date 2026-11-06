@@ -6,6 +6,7 @@ import definePlugin, { PluginNative } from "@utils/types";
 import { ContextMenuApi, Menu, ScrollerThin, SelectedChannelStore, useEffect, useRef, useState } from "@webpack/common";
 
 import { getWatchUrl, startManager, stopManager } from "./manager";
+import { getLiveEntry } from "./nativeUi";
 import { CursorMode, getLive, listCameras, LiveSource, PRESETS, Preset, sourcesApi } from "./live";
 
 const Native = VencordNative.pluginHelpers.GoLiveP2P as PluginNative<typeof import("./native")>;
@@ -391,8 +392,76 @@ export default definePlugin({
                 match: /(\i\.d\(\i,\{default:\(\)=>)\i(\}\)(?=.{0,300000}?GO_LIVE_MODAL_SETTINGS_SELECTION))/s,
                 replace: "$1$self.WrappedModal$2"
             }
+        },
+
+        // Bloqueio regional (experimento "2026-08-video-guard"): o Discord desliga o proprio video da conta.
+        // A nossa live nao usa o video do Discord, entao so ela e liberada; camera e Go Live oficial continuam bloqueados.
+        {
+            // pode abrir o seletor de live (que e o nosso)
+            find: ".DESKTOP_CAPTURE)}",
+            replacement: {
+                match: /return (\i)\.supportsInApp\((\i\.\i)\.VIDEO\)&&\1\.supportsInApp\(\2\.DESKTOP_CAPTURE\)/,
+                replace: "return $1.supportsInApp($2.DESKTOP_CAPTURE)"
+            }
+        },
+        {
+            // botao de transmitir na barra da call: aparece e sem o icone de bloqueado
+            find: "isSelfStream:!0,onPopoutClick",
+            replacement: [
+                {
+                    match: /if\(!\(0,\i\.\i\)\(\[(\i\.\i)\],\(\)=>\1\.supports\(\i\.\i\.VIDEO\)\)\)return null;(?=function \i\(\)\{\(\(0,\i\.\i\)\(\i,\i\.\i\.STREAM,!0\))/,
+                    replace: ""
+                },
+                {
+                    match: /videoBlocked:\i,isSelfStream:!0/,
+                    replace: "videoBlocked:!1,isSelfStream:!0"
+                }
+            ]
+        },
+        {
+            // botao de transmitir no painel de baixo
+            find: 'location:"RTCConnection"',
+            all: true,
+            noWarn: true,
+            replacement: {
+                match: /(\i)=!\i\.\i\.useConfig\(\{location:"RTCConnection"\}\)\.videoEnabled,(?=\i=\i\.useCallback\(\(\)=>\{\(0,\i\.\i\)\(\i,\i\.id,\i\)\})/,
+                replace: "$1=!1,"
+            }
+        },
+        {
+            // quadro da nossa live entra na grade da call
+            find: "getActiveStreamForUser(e,d);if(",
+            replacement: {
+                match: /if\((\i\.\i)\.supports\((\i\.\i)\.VIDEO\)&&null!=(\i)&&\3\.channelId===this\.channelId\)/,
+                replace: "if(($self.isOurStream($3)||$1.supports($2.VIDEO))&&null!=$3&&$3.channelId===this.channelId)"
+            }
+        },
+        {
+            // e mostra o video nele
+            find: "Stream Tile State",
+            replacement: {
+                match: /null!=(\i)&&!(\i)&&null!=(\i)&&(\i\.\i)\.supports\((\i\.\i)\.VIDEO\)\)return/,
+                replace: "null!=$1&&!$2&&null!=$3&&($self.isOurStream($1)||$4.supports($5.VIDEO)))return"
+            }
+        },
+        {
+            // conta como participante com video (layout da grade)
+            find: ".voiceState?.selfVideo??!1)}",
+            replacement: {
+                match: /!!(\i\.\i)\.supports\((\i\.\i)\.VIDEO\)&&\(\(0,(\i\.\i)\)\((\i)\)\?null!=\4\.streamId/,
+                replace: "($self.isOurParticipant($4)||!!$1.supports($2.VIDEO))&&((0,$3)($4)?null!=$4.streamId"
+            }
         }
     ],
+
+    isOurStream(s: any) {
+        return !!s?.ownerId && !!getLiveEntry(s.ownerId);
+    },
+
+    isOurParticipant(p: any) {
+        // o resto da condicao ja confere se e um quadro de live (tipo STREAM = 0)
+        return !!p?.user?.id && !!getLiveEntry(p.user.id);
+    },
 
     onNativeQuality(resolution: number, fps: number) {
         const live = getLive();
