@@ -1,5 +1,5 @@
 #!/bin/bash
-# Publica uma versao nova do GoLive P2P (os PCs dos amigos atualizam sozinhos).
+# Publica uma versao nova do pdLink (os PCs dos amigos atualizam sozinhos).
 # Uso: bash publish.sh 1.0.1 "o que mudou"
 set -e
 cd "$(dirname "$0")"
@@ -21,5 +21,5 @@ cp installer/installer.cpp installer/build.bat "$REPO/package/installer/"
 cp ../Vencord/scripts/build/common.mjs ../Vencord/scripts/build/build.mjs "$REPO/vencord-build/"
 (cd "$REPO" && git add -A && (git diff --cached --quiet || git commit -q -m "Versao $VER") && git push -q)
 
-gh release create "v$VER" release/* --repo pdhenklein/golive-p2p --title "GoLive P2P $VER" --notes "$NOTES"
+gh release create "v$VER" release/* --repo pdhenklein/pdlink --title "pdLink $VER" --notes "$NOTES"
 echo "publicado v$VER"

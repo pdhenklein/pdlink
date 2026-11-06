@@ -47,7 +47,7 @@ export const IS_ANTI_CRASH_TEST = process.argv.includes("--anti-crash-test");
 export const IS_STANDALONE = process.argv.includes("--standalone");
 
 export const IS_UPDATER_DISABLED = process.argv.includes("--disable-updater");
-// Pacote do GoLive P2P: so o nucleo do Vencord (_api e _core) e este userplugin entram no build
+// Pacote do pdLink: so o nucleo do Vencord (_api e _core) e este userplugin entram no build
 export const ONLY_PLUGIN = process.env.GOLIVE_ONLY;
 export const gitHash = process.env.VENCORD_HASH || execSync("git rev-parse --short HEAD", { encoding: "utf-8" }).trim();
 

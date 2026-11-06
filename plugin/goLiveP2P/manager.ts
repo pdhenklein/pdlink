@@ -2,7 +2,8 @@ import { ChannelStore, GuildMemberStore, RelationshipStore, SelectedChannelStore
 
 import { createMarkSession, dropMarkSession, notifyMarkSessions, registerMarkSession } from "./marks";
 import { type Mark } from "./marksCore";
-import { pickName } from "./names";
+import { bindFiles, handleOffer, type Peer, setPeers } from "./files";
+import { pickFullName, pickName } from "./names";
 import { PluginNative } from "@utils/types";
 
 import { getLive, getLocalToken, saveProbe, takeFlag, watchBase } from "./live";
@@ -23,13 +24,48 @@ let hubError = "";
 let encoderCaps: any = null;
 let statsTimer: any = null;
 let watchUrl = "";
-const Native = VencordNative.pluginHelpers.GoLiveP2P as PluginNative<typeof import("./native")>;
+const Native = VencordNative.pluginHelpers.pdLink as PluginNative<typeof import("./native")>;
 // funcoes novas do lado nativo so existem depois de reiniciar o Discord; ate la, ignorar sem quebrar nada
 function nativeCall(name: string, ...args: any[]) {
     try { (Native as any)[name]?.(...args)?.catch?.(() => { }); } catch { }
 }
 let overlayKey = "";
 let lastMarksAllowed: boolean | null = null;
+
+// nome completo da pessoa naquela chamada (para listas)
+function fullName(userId: string) {
+    try {
+        const u: any = UserStore.getUser(userId);
+        const ch: any = channelId ? ChannelStore.getChannel(channelId) : null;
+        const guildId: string | undefined = ch?.guild_id;
+        return pickFullName({
+            guildNick: guildId ? GuildMemberStore.getNick(guildId, userId) : null,
+            groupNick: ch?.nicks?.[userId],
+            friendNick: RelationshipStore.getNickname(userId),
+            globalName: u?.globalName, username: u?.username
+        }, !!guildId);
+    } catch {
+        return "";
+    }
+}
+
+// quem na chamada esta com o mod aberto (pode receber arquivo)
+const hashCache = new Map<string, string>();
+async function hashOf(userId: string) {
+    let h = hashCache.get(userId);
+    if (!h && channelId) { h = await userHash(channelId, userId); hashCache.set(userId, h); }
+    return h ?? "";
+}
+async function refreshPeers() {
+    const h = hub;
+    if (!h || !channelId) return;
+    const list: Peer[] = [];
+    for (const id of others()) {
+        const at = h.mods.get(await hashOf(id));
+        if (at && Date.now() - at < 70000) list.push({ id, name: fullName(id) });
+    }
+    if (hub === h) setPeers(list);
+}
 
 // nome da pessoa NAQUELA chamada (apelido do servidor, do grupo ou de amigo), so a primeira palavra
 function displayName(userId: string) {
@@ -166,7 +202,7 @@ async function watch(userId: string) {
         registerMarkSession(userId, session);
         setLiveEntry(userId, { watching: true, stream: h.stream, label: h.info.label, local: false });
     } catch (e) {
-        console.warn("[GoLiveP2P] nao consegui assistir", e);
+        console.warn("[pdLink] nao consegui assistir", e);
         hubError = String(e);
     }
 }
@@ -180,6 +216,8 @@ function unwatch(userId: string) {
 }
 
 function teardownChannel() {
+    bindFiles(null);
+    hashCache.clear();
     overlayKey = "";
     lastMarksAllowed = null;
     nativeCall("overlayStop");
@@ -207,20 +245,24 @@ async function syncChannel() {
     h.onPresence = () => { applyPresence(); };
     h.onViewers = ids => setLiveEntry(self, { viewers: ids });
     h.nameOf = displayName;
+    // arquivos: so aceito oferta de quem esta na chamada agora
+    bindFiles({ hub: h, myId: self, nameOf: fullName });
+    h.onFileOffer = (from, offer) => { if (others().includes(from)) handleOffer(from, fullName(from), offer); };
+    h.onMods = () => { refreshPeers(); };
     h.onMark = (_uid, m: Mark) => nativeCall("overlayMark", JSON.stringify(m));
     // so assiste quem o Discord mostra na mesma chamada agora (ou a pagina de teste aberta neste PC)
     h.isAllowedViewer = m => {
         if (m?.userId && m.userId !== self && others().includes(m.userId)) return true;
         return !!m?.localToken && !!localToken && m.localToken === localToken;
     };
-    resolveTimer = setInterval(applyPresence, 5000);
+    resolveTimer = setInterval(() => { applyPresence(); refreshPeers(); }, 5000);
     try {
         await h.connect();
         hubError = "";
         syncLive();
     } catch (e) {
         hubError = String(e);
-        console.warn("[GoLiveP2P] ponto de encontro indisponivel", e);
+        console.warn("[pdLink] ponto de encontro indisponivel", e);
     }
 }
 
@@ -289,7 +331,7 @@ export function startManager() {
     callbacks.watch = userId => { watch(userId); };
     callbacks.unwatch = userId => unwatch(userId);
     unsubLive = getLive().subscribe(syncLive);
-    channelListener = () => { syncChannel().catch(e => console.error("[GoLiveP2P]", e)); };
+    channelListener = () => { syncChannel().catch(e => console.error("[pdLink]", e)); };
     (SelectedChannelStore as any).addChangeListener(channelListener);
     // o plugin pode iniciar com o usuario ja numa chamada
     setTimeout(channelListener, 3000);

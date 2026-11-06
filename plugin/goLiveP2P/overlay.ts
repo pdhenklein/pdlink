@@ -14,10 +14,21 @@ let ready = false;
 let queue: string[] = [];
 let lastRect: { x: number; y: number; w: number; h: number; } | null = null;
 let helperPath = "";
+let isTemp = false; // janela criada so para mostrar um aviso (sem live): fecha sozinha
+let tempTimer: any = null;
 
 function page() {
     return `<!doctype html><html><body style="margin:0;background:transparent;overflow:hidden">
+<style>
+#toast { position: fixed; top: 24px; right: 24px; max-width: 380px; padding: 12px 16px; border-radius: 12px; background: rgba(24,25,28,.96);
+  color: #fff; font: 600 15px/1.35 "Segoe UI", sans-serif; box-shadow: 0 6px 24px rgba(0,0,0,.5); opacity: 0; transform: translateY(-12px);
+  transition: opacity .3s, transform .3s; border-left: 4px solid #5865f2; }
+#toast.show { opacity: 1; transform: none; }
+#toast .tt { font-size: 13px; color: #b5bac1; font-weight: 600; margin-bottom: 2px; }
+#toast .tx { word-break: break-word; }
+</style>
 <canvas id="c" style="position:fixed;left:0;top:0;width:100%;height:100%"></canvas>
+<div id="toast"><div class="tt"></div><div class="tx"></div></div>
 <script>
 var __name = function (f) { return f; };
 var makeBoard = ${makeBoard.toString()};
@@ -33,6 +44,14 @@ function fit() {
   cv.height = Math.max(1, Math.round(innerHeight * d));
   redraw();
 }
+var toastEl = document.getElementById("toast"), toastTimer = 0;
+window.__t = function (t) {
+  toastEl.querySelector(".tt").textContent = String(t.title || "").slice(0, 80);
+  toastEl.querySelector(".tx").textContent = String(t.text || "").slice(0, 200);
+  toastEl.className = "show";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { toastEl.className = ""; }, Math.min(15000, Math.max(2000, Number(t.ms) || 7000)));
+};
 window.__m = function (m) {
   var s = board.sanitize(m);
   if (!s) return;
@@ -51,7 +70,7 @@ function ensureWindow() {
     ready = false;
     win = new BrowserWindow({
         show: false, frame: false, transparent: true, hasShadow: false, resizable: false, movable: false,
-        focusable: false, skipTaskbar: true, fullscreenable: false, type: "toolbar", title: "GoLive P2P marcacoes",
+        focusable: false, skipTaskbar: true, fullscreenable: false, type: "toolbar", title: "pdLink marcacoes",
         width: 400, height: 300,
         webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false }
     });
@@ -91,8 +110,9 @@ function onLine(line: string) {
     }
 }
 
-export function startOverlay(helper: string, src: { hwnd?: number; monitor?: number; }) {
+export function startOverlay(helper: string, src: { hwnd?: number; monitor?: number; }, temporary = false) {
     stopOverlay();
+    isTemp = temporary;
     helperPath = helper;
     const args = ["rect"];
     if (src.hwnd != null) args.push("--hwnd", String(src.hwnd));
@@ -119,7 +139,22 @@ export function sendOverlay(m: object) {
     else queue.push(js);
 }
 
+/** Aviso por cima do jogo. Sem live ativa, abre a janela transparente so durante o aviso. */
+export function showToast(helper: string, title: string, text: string, ms = 7000) {
+    if (!tracker) startOverlay(helper, { monitor: 0 }, true);
+    const js = "window.__t(" + JSON.stringify({ title, text, ms }) + ")";
+    if (!win || win.isDestroyed()) ensureWindow();
+    if (ready) win!.webContents.executeJavaScript(js).catch(() => { });
+    else queue.push(js);
+    if (isTemp) {
+        clearTimeout(tempTimer);
+        tempTimer = setTimeout(() => { if (isTemp) stopOverlay(); }, ms + 1500);
+    }
+}
+
 export function stopOverlay() {
+    isTemp = false;
+    clearTimeout(tempTimer);
     if (tracker) {
         try { tracker.stdin?.end(); } catch { }
         try { tracker.kill(); } catch { }

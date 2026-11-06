@@ -1,6 +1,7 @@
 import { React, ReactDOM, useEffect, useRef, useState, UserStore } from "@webpack/common";
 
 import { Board, makeBoard, Mark, View } from "./marksCore";
+import { settings } from "./settings";
 
 // Ping e desenho de quem assiste: uma camada transparente sobre o video, uma barra de ferramentas que aparece
 // quando o mouse esta em cima, e a ponte com o transmissor (canal "m" do P2P).
@@ -53,27 +54,30 @@ export const COLORS = ["#3b82f6", "#ef4444", "#22c55e", "#eab308", "#f97316", "#
 const WIDTHS = [3, 6, 12];
 const ERASER_W = 34;
 
-function load(key: string, fallback: string) {
-    try { return localStorage.getItem("golive-p2p:" + key) || fallback; } catch { return fallback; }
-}
-function save(key: string, value: string) {
-    try { localStorage.setItem("golive-p2p:" + key, value); } catch { }
-}
-
+// Cor e espessura ficam nas configuracoes do mod (settings.json), que sobrevivem as atualizacoes
+// (o localStorage nao serve: o Discord nao deixa o plugin usa-lo de forma confiavel).
 interface Ui { mode: Mode; tool: Tool; color: string; width: number; }
-const initialColor = load("markColor", COLORS[0]);
-let ui: Ui = {
-    mode: "off", tool: "pen",
-    color: /^#[0-9a-fA-F]{6}$/.test(initialColor) ? initialColor : COLORS[0],
-    width: Math.max(0, WIDTHS.indexOf(Number(load("markWidth", "6"))))
-};
-if (ui.width < 0) ui.width = 1;
+let ui: Ui = { mode: "off", tool: "pen", color: COLORS[0], width: 1 };
+let uiLoaded = false;
 const uiSubs = new Set<() => void>();
 
+function ensureUi() {
+    if (uiLoaded) return;
+    uiLoaded = true;
+    try {
+        const c = settings.store.markColor;
+        const w = WIDTHS.indexOf(Number(settings.store.markWidth));
+        ui = { ...ui, color: /^#[0-9a-fA-F]{6}$/.test(String(c)) ? String(c) : COLORS[0], width: w >= 0 ? w : 1 };
+    } catch { }
+}
+
 function setUi(patch: Partial<Ui>) {
+    ensureUi();
     ui = { ...ui, ...patch };
-    if (patch.color) save("markColor", ui.color);
-    if (patch.width != null) save("markWidth", String(WIDTHS[ui.width]));
+    try {
+        if (patch.color) settings.store.markColor = ui.color;
+        if (patch.width != null) settings.store.markWidth = WIDTHS[ui.width];
+    } catch { }
     uiSubs.forEach(f => f());
 }
 
@@ -91,6 +95,7 @@ function changeMode(mode: Mode) {
 }
 
 function useBus() {
+    ensureUi();
     const [, force] = useState(0);
     useEffect(() => {
         const f = () => force(n => n + 1);

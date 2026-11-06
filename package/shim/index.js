@@ -1,7 +1,7 @@
-// Carregador do GoLive P2P dentro do Discord.
+// Carregador do pdLink dentro do Discord.
 // 1. Se uma atualizacao foi baixada, coloca-a no lugar antes de carregar (nada muda com o Discord aberto).
 // 2. Guarda as configuracoes numa pasta propria (nao mistura com outro Vencord).
-// 3. Carrega o GoLive P2P, que por sua vez carrega o Discord original (_app.asar).
+// 3. Carrega o pdLink, que por sua vez carrega o Discord original (_app.asar).
 const fs = require("original-fs");
 const path = require("path");
 
@@ -38,8 +38,8 @@ process.env.VENCORD_USER_DATA_DIR = path.join(base, "data");
 try {
     require(path.join(app, "patcher.js"));
 } catch (e) {
-    // GoLive P2P quebrado ou removido: abre o Discord normal, sem nada
-    log("falha ao carregar o GoLive P2P, abrindo o Discord normal: " + e);
+    // pdLink quebrado ou removido: abre o Discord normal, sem nada
+    log("falha ao carregar o pdLink, abrindo o Discord normal: " + e);
     const original = path.join(__dirname, "..", "_app.asar");
     const pkg = require(path.join(original, "package.json"));
     require.main.filename = path.join(original, pkg.main);

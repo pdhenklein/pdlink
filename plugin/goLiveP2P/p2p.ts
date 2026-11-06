@@ -1,4 +1,5 @@
 import { FrameReceiver, HwDecoder, HwEncoder, LatestFramePainter, sendFrame } from "./hwvideo";
+import { FileEngine, FileOffer, sanitizeOffer } from "./fileXfer";
 import { Mark, sanitizeMark } from "./marksCore";
 import { MqttClient } from "./mqtt";
 
@@ -187,6 +188,16 @@ export class Hub {
     /** Nome para exibir junto da marcacao. */
     nameOf: (userId: string) => string = () => "";
     private marksAllowed = true;
+    /** Arquivos: o motor usa a mesma caixa de mensagens (MQTT) para combinar a conexao direta. */
+    readonly files = new FileEngine(() => (this.mqtt ? { send: (inbox: string, msg: any) => this.send(inbox, msg), inbox: this.inboxTopic } : null), ICE);
+    /** Alguem da chamada ofereceu um arquivo para mim. */
+    onFileOffer: (fromId: string, offer: FileOffer) => void = () => { };
+    /** Quem na chamada tem o mod (hash do usuario -> ultima vez visto). */
+    mods = new Map<string, number>();
+    onMods: () => void = () => { };
+    private modTopic = "";
+    private filesTopic = "";
+    private modTimer: any = null;
 
     constructor(private channelId: string, private myUserId: string) { }
 
@@ -195,6 +206,8 @@ export class Hub {
         const mine = await userHash(this.channelId, this.myUserId);
         this.presenceTopic = `glp/v1/${this.ch}/live/${mine}`;
         this.inboxTopic = `glp/v1/${this.ch}/in/${rand()}`;
+        this.modTopic = `glp/v1/${this.ch}/mod/${mine}`;
+        this.filesTopic = `glp/v1/${this.ch}/fx/${mine}`;
         await this.open();
     }
 
@@ -209,6 +222,10 @@ export class Hub {
                 m.onClose = () => { if (this.mqtt === m && !this.stopped) this.scheduleReconnect(); };
                 m.subscribe(`glp/v1/${this.ch}/live/+`, (t, p) => this.onPresenceMsg(t, p));
                 m.subscribe(this.inboxTopic, (_t, p) => this.onInbox(p));
+                m.subscribe(`glp/v1/${this.ch}/mod/+`, (t, p) => this.onModMsg(t, p));
+                m.subscribe(this.filesTopic, (_t, p) => this.onFilesTopic(p));
+                this.announceMod();
+                if (!this.modTimer) this.modTimer = setInterval(() => this.announceMod(), 20000);
                 if (this.announced) this.announce(this.announced);
                 return;
             } catch (e) {
@@ -242,6 +259,41 @@ export class Hub {
             this.presence.set(hash, info);
             this.onPresence(hash, info);
         } catch { }
+    }
+
+    // ---------------------------------------------------------- quem tem o mod na chamada + ofertas de arquivo
+
+    /** Avisa a chamada que eu tenho o mod (renovado a cada 20 s; some sozinho se o Discord fechar). */
+    private announceMod() {
+        this.mqtt?.publish(this.modTopic, JSON.stringify({ at: Date.now() }), true);
+    }
+
+    private onModMsg(topic: string, payload: string) {
+        const hash = topic.split("/").pop()!;
+        if (!payload) { if (this.mods.delete(hash)) this.onMods(); return; }
+        try {
+            const at = Number(JSON.parse(payload).at) || 0;
+            if (Date.now() - at > 70000) { if (this.mods.delete(hash)) this.onMods(); return; }
+            const had = this.mods.has(hash);
+            this.mods.set(hash, at);
+            if (!had) this.onMods();
+        } catch { }
+    }
+
+    /** Oferece um arquivo (ja registrado em `files`) a esses usuarios; so eles recebem o aviso. */
+    async sendFileOffer(toUserIds: string[], offer: FileOffer) {
+        for (const id of toUserIds) {
+            const h = await userHash(this.channelId, id);
+            this.mqtt?.publish(`glp/v1/${this.ch}/fx/${h}`, JSON.stringify({ t: "foffer", ...offer, fromId: this.myUserId }));
+        }
+    }
+
+    private onFilesTopic(payload: string) {
+        let m: any;
+        try { m = JSON.parse(payload); } catch { return; }
+        if (m?.t !== "foffer" || typeof m.fromId !== "string" || !/^\d{5,25}$/.test(m.fromId)) return;
+        const offer = sanitizeOffer(m);
+        if (offer) this.onFileOffer(m.fromId, offer);
     }
 
     // ---------------------------------------------------------- transmissor
@@ -302,6 +354,7 @@ export class Hub {
         let m: any;
         try { m = JSON.parse(payload); } catch { return; }
         const id = m.connectionId as string;
+        if (m.type === "FOFFER" || m.type === "FANSWER" || m.type === "FCAND") { this.files.onSignal(m); return; }
         if (m.type === "OFFER") this.acceptOffer(m).catch(e => { this.error = String(e); });
         else if (m.type === "CANDIDATE") {
             const c = this.conns.get(id)?.pc ?? this.viewing.get(id)?.pc;
@@ -663,7 +716,11 @@ export class Hub {
     stop() {
         this.stopped = true;
         clearInterval(this.refreshTimer);
+        clearInterval(this.modTimer);
+        this.modTimer = null;
         clearTimeout(this.reconnectTimer);
+        this.mqtt?.publish(this.modTopic, "", true);
+        this.files.close();
         this.stopBroadcast();
         for (const v of this.viewing.values()) { try { v.pc.close(); } catch { } }
         this.viewing.clear();

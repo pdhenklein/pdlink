@@ -3,7 +3,7 @@ import { wreq } from "@webpack";
 
 import type * as NativeTypes from "./native";
 
-const Native = VencordNative.pluginHelpers.GoLiveP2P as PluginNative<typeof NativeTypes>;
+const Native = VencordNative.pluginHelpers.pdLink as PluginNative<typeof NativeTypes>;
 
 const KEYWORDS = /getAllActiveStreams|getActiveStreamForUser|getStreamForUser|ParticipantType|participants|VideoTile|StreamTile|RTCStream|streamKey|STREAM_KEY/;
 

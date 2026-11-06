@@ -1,4 +1,4 @@
-// Instalador do GoLive P2P: coloca so este plugin no Discord e nada mais.
+// Instalador do pdLink: coloca so este plugin no Discord e nada mais.
 // Sim = instala/atualiza, Nao = remove tudo e devolve o Discord original.
 #include <windows.h>
 #include <tlhelp32.h>
@@ -7,8 +7,8 @@
 #include <string>
 #include <vector>
 
-static const wchar_t* TITLE = L"GoLive P2P";
-static const wchar_t* BASE_URL = L"https://github.com/pdhenklein/golive-p2p/releases/latest/download/";
+static const wchar_t* TITLE = L"pdLink";
+static const wchar_t* BASE_URL = L"https://github.com/pdhenklein/pdlink/releases/latest/download/";
 static const wchar_t* FILES[] = { L"patcher.js", L"preload.js", L"renderer.js", L"renderer.css", L"viewer.html",
                                   L"viewer-hw.js", L"golive-helper.exe", L"golive-shim.asar", L"version.txt" };
 
@@ -37,7 +37,7 @@ static void removeTree(const std::wstring& dir) {
     SHFileOperationW(&op);
 }
 
-// so processos que rodam de dentro da pasta do Discord ou do GoLive P2P
+// so processos que rodam de dentro da pasta do Discord ou do pdLink
 static std::vector<DWORD> discordPids(const std::wstring& discord, const std::wstring& base) {
     std::vector<DWORD> out;
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -156,7 +156,7 @@ static int install(const std::wstring& discord, const std::wstring& base) {
         return 1;
     }
     startDiscord(discord);
-    ask(L"Pronto! O GoLive P2P foi instalado e o Discord esta abrindo.\n\nPara fazer live, use o botao de transmitir de sempre na call.\nAs atualizacoes chegam sozinhas.", MB_OK | MB_ICONINFORMATION);
+    ask(L"Pronto! O pdLink foi instalado e o Discord esta abrindo.\n\nNa call: use o botao de transmitir de sempre para a live e o clipe (a esquerda dos botoes da call) para enviar arquivos.\nAs atualizacoes chegam sozinhas.", MB_OK | MB_ICONINFORMATION);
     return 0;
 }
 
@@ -170,7 +170,7 @@ static int uninstall(const std::wstring& discord, const std::wstring& base) {
     }
     removeTree(base);
     startDiscord(discord);
-    ask(L"O GoLive P2P foi removido. O Discord voltou ao normal.", MB_OK | MB_ICONINFORMATION);
+    ask(L"O pdLink foi removido. O Discord voltou ao normal.", MB_OK | MB_ICONINFORMATION);
     return 0;
 }
 
@@ -185,7 +185,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR cmd, int) {
     if (cmd && wcsstr(cmd, L"/remover")) return uninstall(discord, base);
     if (cmd && wcsstr(cmd, L"/instalar")) return install(discord, base);
 
-    int r = ask(L"O que voce quer fazer?\n\nSim = instalar ou atualizar o GoLive P2P\nNao = remover o GoLive P2P do Discord", MB_YESNOCANCEL | MB_ICONQUESTION);
+    int r = ask(L"O que voce quer fazer?\n\nSim = instalar ou atualizar o pdLink\nNao = remover o pdLink do Discord", MB_YESNOCANCEL | MB_ICONQUESTION);
     if (r == IDYES) return install(discord, base);
     if (r == IDNO) return uninstall(discord, base);
     return 0;

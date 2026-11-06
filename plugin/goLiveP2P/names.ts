@@ -19,3 +19,11 @@ export function pickName(s: NameSources, inGuild: boolean) {
         : s.groupNick || s.friendNick || s.globalName || s.username;
     return firstName(String(n ?? ""));
 }
+
+/** Nome completo (para listas): o mesmo que o Discord mostra naquela chamada. */
+export function pickFullName(s: NameSources, inGuild: boolean) {
+    const n = inGuild
+        ? s.guildNick || s.globalName || s.username
+        : s.groupNick || s.friendNick || s.globalName || s.username;
+    return String(n ?? "").trim().slice(0, 40);
+}

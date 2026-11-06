@@ -7,7 +7,8 @@ import { createServer, Server, ServerResponse } from "http";
 import { tmpdir } from "os";
 import { join } from "path";
 
-import { overlayInfo, sendOverlay, startOverlay, stopOverlay } from "./overlay";
+import { closeAll, closeFile, openFile, reveal, saveDialog, writeFile } from "./fileNative";
+import { overlayInfo, sendOverlay, showToast, startOverlay, stopOverlay } from "./overlay";
 
 // Brokers MQTT publicos usados so para sinalizacao (textos de conexao e quem esta ao vivo); o video nunca passa por la
 CspPolicies["wss://broker.emqx.io:8084"] = ConnectSrc;
@@ -222,7 +223,30 @@ export function overlayStatus(_: IpcMainInvokeEvent) {
     return overlayInfo();
 }
 
+/** Aviso por cima do jogo (some sozinho). Funciona com ou sem live. */
+export function overlayToast(_: IpcMainInvokeEvent, title: string, text: string, ms: number) {
+    showToast(HELPER, String(title), String(text), Number(ms) || 7000);
+}
+
+// Arquivos recebidos: janela de salvar do Windows e gravacao em disco
+export function fileSaveDialog(_: IpcMainInvokeEvent, name: string) {
+    return saveDialog(String(name));
+}
+export function fileOpen(_: IpcMainInvokeEvent, path: string) {
+    return openFile(String(path));
+}
+export function fileWrite(_: IpcMainInvokeEvent, fd: number, data: Uint8Array) {
+    writeFile(fd, data);
+}
+export function fileClose(_: IpcMainInvokeEvent, fd: number, ok: boolean) {
+    closeFile(fd, !!ok);
+}
+export function fileReveal(_: IpcMainInvokeEvent, path: string) {
+    reveal(String(path));
+}
+
 app.on("before-quit", () => {
+    closeAll();
     stopOverlay();
     killHelper();
     for (const c of clients) { try { c.end(); } catch { } }
@@ -263,7 +287,7 @@ export function localToken(_: IpcMainInvokeEvent) {
 
 // Atualizacao automatica (so na versao instalada): baixa a versao nova para "pending";
 // o carregador troca os arquivos na proxima vez que o Discord abrir.
-const REPO = "pdhenklein/golive-p2p";
+const REPO = "pdhenklein/pdlink";
 const PENDING_DIR = join(PKG_DIR, "..", "pending");
 let update = { current: "", ready: "", error: "" };
 
@@ -283,7 +307,7 @@ async function checkUpdate() {
     try {
         update.current = readVersion(PKG_DIR);
         const known = readVersion(PENDING_DIR);
-        const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { "User-Agent": "GoLiveP2P" } });
+        const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { "User-Agent": "pdLink" } });
         if (!res.ok) throw new Error("GitHub respondeu " + res.status);
         const rel = await res.json() as { tag_name: string; assets: { name: string; browser_download_url: string; }[]; };
         const ver = rel.tag_name.replace(/^v/, "");
@@ -296,7 +320,7 @@ async function checkUpdate() {
         for (const a of rel.assets) {
             // instalador e carregador nao fazem parte da pasta do plugin
             if (a.name === "version.txt" || a.name.endsWith(".asar") || a.name.endsWith(".exe") && a.name !== "golive-helper.exe") continue;
-            const r = await fetch(a.browser_download_url, { headers: { "User-Agent": "GoLiveP2P" } });
+            const r = await fetch(a.browser_download_url, { headers: { "User-Agent": "pdLink" } });
             if (!r.ok) throw new Error(`falha ao baixar ${a.name}: ${r.status}`);
             fs.writeFileSync(join(tmp, a.name), Buffer.from(await r.arrayBuffer()));
         }

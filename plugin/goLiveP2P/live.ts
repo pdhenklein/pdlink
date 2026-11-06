@@ -2,9 +2,10 @@ import type { PluginNative } from "@utils/types";
 import { FluxDispatcher } from "@webpack/common";
 
 import { HwDecoder, h264CodecFor, VideoConfig } from "./hwvideo";
+import { settings } from "./settings";
 import type * as NativeTypes from "./native";
 
-const Native = VencordNative.pluginHelpers.GoLiveP2P as PluginNative<typeof NativeTypes>;
+const Native = VencordNative.pluginHelpers.pdLink as PluginNative<typeof NativeTypes>;
 
 export type Preset = "games" | "screen" | "custom";
 export type CursorMode = "follow" | "always" | "never";
@@ -35,6 +36,31 @@ export interface LiveSource {
 
 type Listener = () => void;
 
+const DEFAULT_PREFS: Prefs = { preset: "custom", maxH: 1080, fps: 60, muteAudio: false, cursor: "follow", allowMarks: true };
+
+/** Le as escolhas guardadas (valores estranhos voltam ao padrao). */
+function loadPrefs(): Prefs {
+    const d = DEFAULT_PREFS;
+    try {
+        const s: any = settings.store;
+        const pick = <T,>(v: any, ok: T[], def: T): T => (ok.includes(v) ? v : def);
+        return {
+            preset: pick<Preset>(s.preset, ["games", "screen", "custom"], d.preset),
+            maxH: pick(s.maxH, [0, 480, 720, 1080, 1440], d.maxH),
+            fps: pick(s.fps, [15, 30, 60], d.fps),
+            muteAudio: typeof s.muteAudio === "boolean" ? s.muteAudio : d.muteAudio,
+            cursor: pick<CursorMode>(s.cursor, ["follow", "always", "never"], d.cursor),
+            allowMarks: typeof s.allowMarks === "boolean" ? s.allowMarks : d.allowMarks
+        };
+    } catch {
+        return { ...d };
+    }
+}
+
+function savePrefs(p: Prefs) {
+    try { Object.assign(settings.store, p); } catch { }
+}
+
 // Controlador unico da live. O canvas e a faixa de video dele nunca sao recriados:
 // trocar janela, resolucao ou FPS so muda o que alimenta o canvas.
 class LiveController {
@@ -50,7 +76,7 @@ class LiveController {
 
     running = false;
     source: LiveSource | null = null;
-    prefs: Prefs = { preset: "custom", maxH: 1080, fps: 60, muteAudio: false, cursor: "follow", allowMarks: true };
+    prefs: Prefs = loadPrefs();
     private selfDispatching = false;
     frameCount = 0;
     realFps = 0;
@@ -177,6 +203,7 @@ class LiveController {
 
     setPrefs(p: Partial<Prefs>) {
         this.prefs = { ...this.prefs, ...p };
+        savePrefs(this.prefs);
         this.pushNativeSettings();
         if (this.running && this.source) this.start(this.source);
         else this.emit();
@@ -207,6 +234,7 @@ class LiveController {
         if (a.frameRate != null) next.fps = a.frameRate;
         if (a.soundshareEnabled != null) next.muteAudio = !a.soundshareEnabled;
         this.prefs = { ...this.prefs, ...next };
+        savePrefs(this.prefs);
         if (this.running && this.source) this.start(this.source);
         else this.emit();
     }

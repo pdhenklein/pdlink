@@ -11,7 +11,7 @@ REL="$PKG/release"
 rm -rf "$OUT" "$REL"
 mkdir -p "$REL"
 
-# 1. Vencord enxuto: so o GoLive P2P e o nucleo, sem atualizador do Vencord
+# 1. Vencord enxuto: so o pdLink e o nucleo, sem atualizador do Vencord
 (cd ../Vencord && GOLIVE_ONLY=goLiveP2P GOLIVE_OUT="$OUT" npx --yes pnpm@12.15.0 build --standalone --disable-updater >/dev/null)
 
 # 2. pagina de assistir com decodificacao por hardware
@@ -26,7 +26,7 @@ printf "%s" "$VER" > "$REL/version.txt"
 npx --yes @electron/asar@3.2.17 pack shim "$REL/golive-shim.asar"
 
 # 4. instalador
-cp installer/bin/Instalar-GoLiveP2P.exe "$REL/" 2>/dev/null || echo "AVISO: instalador ainda nao compilado"
+cp installer/bin/Instalar-pdLink.exe "$REL/" 2>/dev/null || echo "AVISO: instalador ainda nao compilado"
 
 echo "versao $VER pronta em $REL"
 ls -la "$REL"

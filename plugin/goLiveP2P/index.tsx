@@ -5,11 +5,14 @@ import { showNotice } from "@api/Notices";
 import definePlugin, { PluginNative } from "@utils/types";
 import { ContextMenuApi, Menu, ScrollerThin, SelectedChannelStore, useEffect, useRef, useState } from "@webpack/common";
 
+import { FilesButton } from "./files";
 import { getWatchUrl, startManager, stopManager } from "./manager";
+import { Settings } from "@api/Settings";
+import { settings } from "./settings";
 import { getLiveEntry } from "./nativeUi";
 import { CursorMode, getLive, listCameras, LiveSource, PRESETS, Preset, sourcesApi } from "./live";
 
-const Native = VencordNative.pluginHelpers.GoLiveP2P as PluginNative<typeof import("./native")>;
+const Native = VencordNative.pluginHelpers.pdLink as PluginNative<typeof import("./native")>;
 let updateTimer: ReturnType<typeof setInterval> | undefined;
 let updateShown = "";
 
@@ -18,7 +21,21 @@ async function checkUpdateReady() {
     const u = await Native.updateStatus().catch(() => null);
     if (!u?.ready || u.ready === updateShown) return;
     updateShown = u.ready;
-    showNotice(`GoLive P2P ${u.ready} foi baixado. Ele passa a valer da proxima vez que voce fechar e abrir o Discord.`, "OK", () => { });
+    showNotice(`pdLink ${u.ready} foi baixado. Ele passa a valer da proxima vez que voce fechar e abrir o Discord.`, "OK", () => { });
+}
+
+// O mod se chamava GoLiveP2P: leva para o nome novo o que a pessoa ja tinha escolhido (cor, resolucao...), uma vez so
+function migrateLegacySettings() {
+    try {
+        if (settings.store.migrated) return;
+        const old = (Settings.plugins as any).GoLiveP2P;
+        if (old) {
+            for (const k of ["markColor", "markWidth", "preset", "maxH", "fps", "muteAudio", "cursor", "allowMarks"]) {
+                if (old[k] !== undefined) (settings.store as any)[k] = old[k];
+            }
+        }
+        settings.store.migrated = true;
+    } catch { }
 }
 
 type Tab = "apps" | "screens" | "devices";
@@ -371,12 +388,22 @@ function createPill() {
 }
 
 export default definePlugin({
-    name: "GoLiveP2P",
-    description: "Troca o botao de Go Live por uma live P2P propria",
+    name: "pdLink",
+    description: "pdLink: lives P2P com ping e desenho, e envio de arquivos sem limite de tamanho",
     authors: [{ name: "local", id: 0n }],
+    settings,
     enabledByDefault: true,
 
     patches: [
+        {
+            // Botao de arquivos na barra de controles da chamada, a esquerda dos botoes do Discord (microfone, camera...).
+            // A barra fica dentro da tela cheia, entao o botao tambem aparece la.
+            find: "CenterControlTray: currentUser cannot be undefined",
+            replacement: {
+                match: /(className:\i\(\)\(\i\.\i,\i\),children:\[)(?=\(0,\i\.jsxs\)\("div",\{className:\i\.\i,children:\[\(0,\i\.jsx\)\(\i\.Y,\{targetElementRef:\i,renderPopout:\i=>\{let\{closePopout:\i\}=\i,\i=\(0,\i\.jsx\)\(\i\.A,\{onInteraction:\i\("AudioDeviceMenu"\))/,
+                replace: "$1$self.renderFilesButton(),"
+            }
+        },
         {
             // Menu nativo "Qualidade da transmissao" (botao verde, painel de baixo, engrenagem do quadro).
             // Sem fonte nativa ele nao fazia nada, e opcoes de Nitro abriam a tela de assinatura: com a nossa live
@@ -484,7 +511,12 @@ export default definePlugin({
         return getLive().getVideoTrack();
     },
 
+    renderFilesButton() {
+        return <FilesButton />;
+    },
+
     start() {
+        migrateLegacySettings();
         createPill();
         startManager();
         updateTimer = setInterval(checkUpdateReady, 10 * 60_000);

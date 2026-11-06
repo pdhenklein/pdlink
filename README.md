@@ -1,16 +1,20 @@
-# GoLive P2P
+# pdLink
 
 Live no Discord sem passar pelos servidores do Discord: a imagem vai direto do seu PC para quem esta assistindo, em ate 1080p60, usando a placa de video (NVENC) para comprimir.
 
 - So quem esta **na mesma call** que voce consegue assistir.
 - O visual e o do proprio Discord: botao de transmitir, "AO VIVO" ao lado do nome, quadro da live na call e menus de qualidade.
+- **Ping e desenho:** quem assiste aponta e desenha na tela de quem transmite (clique com o botao do meio do mouse pinga na hora).
+- **Arquivos sem limite de tamanho:** o clipe, a esquerda dos botoes da call, envia arquivos direto de um PC para o outro. Funciona com ou sem live.
+- **Ping e desenho:** quem assiste aponta e desenha na tela de quem transmite (clique com o botao do meio do mouse pinga na hora).
+- **Arquivos sem limite de tamanho:** o clipe, a esquerda dos botoes da call, envia arquivos direto de um PC para o outro. Funciona com ou sem live.
 - Instala **apenas este plugin**, nada mais.
 
 ## Como instalar
 
-1. Baixe o `Instalar-GoLiveP2P.exe` na [ultima versao](https://github.com/pdhenklein/golive-p2p/releases/latest).
+1. Baixe o `Instalar-pdLink.exe` na [ultima versao](https://github.com/pdhenklein/pdlink/releases/latest).
 2. Abra ele e clique em **Sim**. Se o Discord estiver aberto, ele pede para fechar (saia da call antes).
-3. Pronto. O Discord abre sozinho com o GoLive P2P.
+3. Pronto. O Discord abre sozinho com o pdLink.
 
 O Windows pode mostrar um aviso azul ("O Windows protegeu o computador") porque o programa nao e assinado. Clique em **Mais informacoes** e depois em **Executar assim mesmo**.
 
@@ -18,11 +22,11 @@ O Windows pode mostrar um aviso azul ("O Windows protegeu o computador") porque 
 
 Sao automaticas. Quando sai uma versao nova, o plugin baixa sozinho e avisa com uma faixa no topo do Discord. A versao nova passa a valer da proxima vez que voce fechar e abrir o Discord (inclusive pela bandeja, perto do relogio).
 
-Quando o proprio Discord se atualiza, o GoLive P2P se reinstala sozinho na versao nova.
+Quando o proprio Discord se atualiza, o pdLink se reinstala sozinho na versao nova.
 
 ## Como remover
 
-Abra o `Instalar-GoLiveP2P.exe` de novo e clique em **Nao**. O Discord volta exatamente ao original.
+Abra o `Instalar-pdLink.exe` de novo e clique em **Nao**. O Discord volta exatamente ao original.
 
 ## Requisitos
 
