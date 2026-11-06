@@ -156,6 +156,8 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
     const loop = useRef(0);
     const stroke = useRef<{ pts: [number, number][]; first: boolean; raf: number; down: boolean; } | null>(null);
     const lastPing = useRef(0);
+    const pingAt = useRef<((cx: number, cy: number) => boolean) | null>(null);
+    const midHandled = useRef(0);
     const allowed = !!session && session.allowed();
     const active = ui.mode !== "off";
 
@@ -225,6 +227,24 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
             }
         };
         const key = (e: KeyboardEvent) => { if (e.key === "Escape" && ui.mode !== "off") changeMode("off"); };
+        // botao do meio (roda do mouse) pinga direto, sem ligar o modo ping, como nos jogos
+        const onMid = (e: MouseEvent) => {
+            if (e.button !== 1 || !pingAt.current) return;
+            const r = v.getBoundingClientRect();
+            if (!(r.width > 0 && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom)) return;
+            const top = doc.elementFromPoint(e.clientX, e.clientY);
+            if (top?.closest('[role="dialog"], [role="menu"], [class*="layerContainer"]')) return; // janelas e menus do Discord na frente
+            if (pingAt.current(e.clientX, e.clientY)) {
+                e.preventDefault(); // evita a rolagem automatica do botao do meio
+                e.stopPropagation();
+                midHandled.current = performance.now();
+            }
+        };
+        const onAux = (e: MouseEvent) => {
+            if (e.button === 1 && performance.now() - midHandled.current < 1500) { e.preventDefault(); e.stopPropagation(); }
+        };
+        doc.addEventListener("mousedown", onMid, true);
+        doc.addEventListener("auxclick", onAux, true);
         // se a janela mudar de tamanho ou a tela rolar, o desenho precisa acompanhar o video
         const relayout = () => kick();
         // em tela cheia o Discord so mostra o elemento da tela cheia (e o que estiver dentro dele): a camada tem que ir para la
@@ -241,10 +261,13 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
             win?.removeEventListener("resize", relayout);
             doc.removeEventListener("scroll", relayout, true);
             doc.removeEventListener("fullscreenchange", onFullscreen);
+            doc.removeEventListener("mousedown", onMid, true);
+            doc.removeEventListener("auxclick", onAux, true);
             clearTimeout(idleTimer.current);
         };
     }, []);
 
+    pingAt.current = null;
     if (!session || !allowed || !box || box.w < 120 || box.h < 70) return null;
     const v = video.current;
     const doc = v?.ownerDocument;
@@ -264,6 +287,21 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
     };
     const r4 = (n: number) => Math.round(n * 10000) / 10000;
 
+    // ping no ponto (usado pelo modo ping e pelo botao do meio); false = clique fora da imagem (faixa preta)
+    const doPing = (cx: number, cy: number) => {
+        const p = toNorm(cx, cy);
+        if (!p) return false;
+        const now = performance.now();
+        if (now - lastPing.current < 150) return true;
+        lastPing.current = now;
+        const m: Mark = { t: "ping", x: r4(p[0]), y: r4(p[1]), c: ui.color };
+        if (self) session.board.apply({ ...m, from: self, n: "" }, now);
+        session.send(m);
+        kick();
+        return true;
+    };
+    pingAt.current = doPing;
+
     const flush = () => {
         const st = stroke.current;
         if (!st || !st.pts.length) return;
@@ -282,15 +320,10 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
     const onDown = (e: React.PointerEvent) => {
         e.stopPropagation();
         e.preventDefault();
+        if (e.button !== 0) return; // o botao do meio e tratado pelo ouvinte do documento (ping direto)
         const p = toNorm(e.clientX, e.clientY);
         if (ui.mode === "ping") {
-            const now = performance.now();
-            if (!p || now - lastPing.current < 150) return;
-            lastPing.current = now;
-            const m: Mark = { t: "ping", x: r4(p[0]), y: r4(p[1]), c: ui.color };
-            if (self) session.board.apply({ ...m, from: self, n: "" }, now);
-            session.send(m);
-            kick();
+            doPing(e.clientX, e.clientY);
         } else if (ui.mode === "draw") {
             try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { }
             stroke.current = { pts: p ? [p] : [], first: true, raf: 0, down: true };
@@ -355,7 +388,7 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
                         background: "rgba(24,25,28,.92)", boxShadow: "0 4px 14px rgba(0,0,0,.45)", userSelect: "none"
                     }}
                 >
-                    <Btn title="Ping (clique para apontar algo)" active={ui.mode === "ping"} onClick={() => changeMode(ui.mode === "ping" ? "off" : "ping")}><PingIcon /></Btn>
+                    <Btn title="Ping (ou clique com o botão do meio do mouse)" active={ui.mode === "ping"} onClick={() => changeMode(ui.mode === "ping" ? "off" : "ping")}><PingIcon /></Btn>
                     <Btn title="Desenhar" active={ui.mode === "draw" && ui.tool === "pen"} onClick={() => { if (ui.mode !== "draw") changeMode("draw"); setUi({ tool: "pen" }); }}><PenIcon /></Btn>
                     {ui.mode === "draw" && <Btn title="Borracha" active={ui.tool === "eraser"} onClick={() => setUi({ tool: ui.tool === "eraser" ? "pen" : "eraser" })}><EraserIcon /></Btn>}
                     {active && colorBtn}
