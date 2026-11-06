@@ -89,11 +89,13 @@ function syncOverlay() {
     const live = getLive();
     const src = live.source;
     const wanted = live.running && live.prefs.allowMarks && !!src && src.kind !== "camera";
-    const key = wanted ? `${src!.kind}:${src!.kind === "window" ? src!.hwnd : src!.monitor}` : "";
+    // tela inteira: a janela das marcacoes sai da captura (senao entra na imagem da live); janela: aparece normal em prints e gravacoes
+    const exclude = wanted && src!.kind === "monitor" && !live.prefs.marksInCapture;
+    const key = wanted ? `${src!.kind}:${src!.kind === "window" ? src!.hwnd : src!.monitor}:${exclude ? "x" : "i"}` : "";
     if (key !== overlayKey) {
         overlayKey = key;
         if (!key) nativeCall("overlayStop");
-        else nativeCall("overlayStart", src!.kind === "window" ? { hwnd: src!.hwnd } : { monitor: src!.monitor });
+        else nativeCall("overlayStart", src!.kind === "window" ? { hwnd: src!.hwnd } : { monitor: src!.monitor }, exclude);
     }
     if (hub && lastMarksAllowed !== wanted) {
         lastMarksAllowed = wanted;

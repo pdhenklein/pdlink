@@ -18,6 +18,8 @@ export interface Prefs {
     cursor: CursorMode;
     /** Espectadores podem apontar (ping) e desenhar na minha tela. */
     allowMarks: boolean;
+    /** Ping e desenho aparecem em prints e gravacoes mesmo transmitindo a tela inteira (entao tambem entram na imagem da live). */
+    marksInCapture: boolean;
 }
 
 export const PRESETS: Record<Exclude<Preset, "custom">, { maxH: number; fps: number; }> = {
@@ -36,7 +38,7 @@ export interface LiveSource {
 
 type Listener = () => void;
 
-const DEFAULT_PREFS: Prefs = { preset: "custom", maxH: 1080, fps: 60, muteAudio: false, cursor: "follow", allowMarks: true };
+const DEFAULT_PREFS: Prefs = { preset: "custom", maxH: 1080, fps: 60, muteAudio: false, cursor: "follow", allowMarks: true, marksInCapture: false };
 
 /** Le as escolhas guardadas (valores estranhos voltam ao padrao). */
 function loadPrefs(): Prefs {
@@ -50,7 +52,8 @@ function loadPrefs(): Prefs {
             fps: pick(s.fps, [15, 30, 60], d.fps),
             muteAudio: typeof s.muteAudio === "boolean" ? s.muteAudio : d.muteAudio,
             cursor: pick<CursorMode>(s.cursor, ["follow", "always", "never"], d.cursor),
-            allowMarks: typeof s.allowMarks === "boolean" ? s.allowMarks : d.allowMarks
+            allowMarks: typeof s.allowMarks === "boolean" ? s.allowMarks : d.allowMarks,
+            marksInCapture: typeof s.marksInCapture === "boolean" ? s.marksInCapture : d.marksInCapture
         };
     } catch {
         return { ...d };

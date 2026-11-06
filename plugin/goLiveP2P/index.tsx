@@ -200,6 +200,11 @@ function GearMenu() {
                     checked={p.allowMarks}
                     action={() => live.setPrefs({ allowMarks: !p.allowMarks })}
                 />
+                <Menu.MenuCheckboxItem
+                    id="golive-marks-capture" label="Ping e desenho em prints e gravações (tela inteira)"
+                    checked={p.marksInCapture}
+                    action={() => live.setPrefs({ marksInCapture: !p.marksInCapture })}
+                />
                 <Menu.MenuItem id="golive-advanced" label="Avançado">
                     <Menu.MenuGroup label="Cursor na transmissão">
                         {CURSOR_OPTIONS.map(o => (

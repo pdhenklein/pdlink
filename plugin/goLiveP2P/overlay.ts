@@ -14,6 +14,10 @@ let ready = false;
 let queue: string[] = [];
 let lastRect: { x: number; y: number; w: number; h: number; } | null = null;
 let helperPath = "";
+// Fora da captura (SetWindowDisplayAffinity) so quando precisa: transmitindo a TELA INTEIRA, a janela entraria na imagem da live
+// e as marcacoes apareceriam em dobro. Transmitindo uma JANELA, a captura pega so aquela janela, entao a nossa pode
+// aparecer normalmente em prints (Ferramenta de Recorte, Lightshot) e gravacoes (ShadowPlay).
+let protect = false;
 let isTemp = false; // janela criada so para mostrar um aviso (sem live): fecha sozinha
 let tempTimer: any = null;
 
@@ -75,7 +79,7 @@ function ensureWindow() {
         webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false }
     });
     win.setIgnoreMouseEvents(true);
-    win.setContentProtection(true);
+    win.setContentProtection(protect);
     win.setAlwaysOnTop(true, "screen-saver");
     win.webContents.once("did-finish-load", () => {
         ready = true;
@@ -95,7 +99,7 @@ function place(r: { x: number; y: number; w: number; h: number; }) {
     w.setBounds(dip); // 2x: entre monitores com escalas diferentes a primeira chamada pode errar o tamanho
     if (!w.isVisible()) w.showInactive();
     // o Windows so aplica "fora da captura" depois que a janela aparece; reafirma aqui (verificado: 0x11 = WDA_EXCLUDEFROMCAPTURE)
-    w.setContentProtection(true);
+    w.setContentProtection(protect);
     w.setAlwaysOnTop(true, "screen-saver");
 }
 
@@ -110,9 +114,10 @@ function onLine(line: string) {
     }
 }
 
-export function startOverlay(helper: string, src: { hwnd?: number; monitor?: number; }, temporary = false) {
+export function startOverlay(helper: string, src: { hwnd?: number; monitor?: number; }, temporary = false, excludeFromCapture = false) {
     stopOverlay();
     isTemp = temporary;
+    protect = excludeFromCapture;
     helperPath = helper;
     const args = ["rect"];
     if (src.hwnd != null) args.push("--hwnd", String(src.hwnd));

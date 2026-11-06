@@ -207,8 +207,8 @@ export function status(_: IpcMainInvokeEvent) {
 }
 
 // Marcacoes dos espectadores (ping e desenho) desenhadas por cima da janela transmitida
-export function overlayStart(_: IpcMainInvokeEvent, src: { hwnd?: number; monitor?: number; }) {
-    startOverlay(HELPER, src);
+export function overlayStart(_: IpcMainInvokeEvent, src: { hwnd?: number; monitor?: number; }, excludeFromCapture?: boolean) {
+    startOverlay(HELPER, src, false, !!excludeFromCapture);
 }
 
 export function overlayMark(_: IpcMainInvokeEvent, json: string) {

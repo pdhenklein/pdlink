@@ -13,5 +13,6 @@ export const settings = definePluginSettings({
     muteAudio: { type: OptionType.BOOLEAN, description: "Silenciar o som da live", default: false, hidden: true },
     cursor: { type: OptionType.STRING, description: "Cursor na live", default: "follow", hidden: true },
     migrated: { type: OptionType.BOOLEAN, description: "Ja trouxe as escolhas do nome antigo (GoLiveP2P)", default: false, hidden: true },
+    marksInCapture: { type: OptionType.BOOLEAN, description: "Ping e desenho aparecem em prints e gravacoes", default: false, hidden: true },
     allowMarks: { type: OptionType.BOOLEAN, description: "Aceitar ping e desenho dos espectadores", default: true, hidden: true }
 });
