@@ -1,12 +1,11 @@
 import { CogWheel } from "@components/Icons";
 import { copyWithToast } from "@utils/discord";
 import { ModalRoot, ModalSize, openModal } from "@utils/modal";
-import { showNotice } from "@api/Notices";
 import definePlugin, { PluginNative } from "@utils/types";
 import { ContextMenuApi, Menu, ScrollerThin, SelectedChannelStore, useEffect, useRef, useState } from "@webpack/common";
 
 import { FilesButton } from "./files";
-import { UpdateCountdown } from "./updateUi";
+import { showUpdateBanner } from "./updateBanner";
 import { getWatchUrl, startManager, stopManager } from "./manager";
 import { Settings } from "@api/Settings";
 import { settings } from "./settings";
@@ -23,9 +22,7 @@ async function checkUpdateReady() {
     if (!u?.ready || u.ready === updateShown) return;
     updateShown = u.ready;
     const version = u.ready;
-    showNotice(`pdLink ${version} esta pronto.`, "Atualizar", () => {
-        showNotice(<UpdateCountdown version={version} inCall={!!SelectedChannelStore.getVoiceChannelId()} restart={() => Native.updateRestart()} />, "Cancelar", () => { });
-    });
+    showUpdateBanner(version, !!SelectedChannelStore.getVoiceChannelId(), () => Native.updateRestart());
 }
 
 // O mod se chamava GoLiveP2P: leva para o nome novo o que a pessoa ja tinha escolhido (cor, resolucao...), uma vez so
