@@ -18,6 +18,7 @@ let helperPath = "";
 // e as marcacoes apareceriam em dobro. Transmitindo uma JANELA, a captura pega so aquela janela, entao a nossa pode
 // aparecer normalmente em prints (Ferramenta de Recorte, Lightshot) e gravacoes (ShadowPlay).
 let protect = false;
+let topTimer: any = null; // mantem a janela por cima do jogo (o jogo se levanta sozinho ao ganhar o foco)
 let isTemp = false; // janela criada so para mostrar um aviso (sem live): fecha sozinha
 let tempTimer: any = null;
 
@@ -101,6 +102,16 @@ function place(r: { x: number; y: number; w: number; h: number; }) {
     // o Windows so aplica "fora da captura" depois que a janela aparece; reafirma aqui (verificado: 0x11 = WDA_EXCLUDEFROMCAPTURE)
     w.setContentProtection(protect);
     w.setAlwaysOnTop(true, "screen-saver");
+    // Jogo em tela cheia (sem bordas) tambem fica "sempre por cima" e vai para a frente quando ganha o foco, passando por cima da
+    // nossa janela. Reafirma a posicao algumas vezes por segundo (sem pegar o foco).
+    if (!topTimer) {
+        topTimer = setInterval(() => {
+            if (win && !win.isDestroyed() && win.isVisible()) {
+                win.setAlwaysOnTop(true, "screen-saver");
+                win.moveTop();
+            }
+        }, 400);
+    }
 }
 
 function onLine(line: string) {
@@ -158,6 +169,8 @@ export function showToast(helper: string, title: string, text: string, ms = 7000
 }
 
 export function stopOverlay() {
+    clearInterval(topTimer);
+    topTimer = null;
     isTemp = false;
     clearTimeout(tempTimer);
     if (tracker) {

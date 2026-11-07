@@ -6,6 +6,7 @@
 //   interactive
 #define NOMINMAX
 #include <windows.h>
+#include <tlhelp32.h>
 #include <unknwn.h>
 #include <dwmapi.h>
 #include <d3d11_4.h>
@@ -19,6 +20,8 @@
 #include <mferror.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
+#include <audiopolicy.h>
+#include <functiondiscoverykeys_devpkey.h>
 #include <audioclientactivationparams.h>
 #include <shellapi.h>
 #include <wincodec.h>
@@ -35,6 +38,8 @@
 #include <windows.graphics.directx.direct3d11.interop.h>
 
 #include <algorithm>
+#include <map>
+#include <set>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -109,6 +114,14 @@ struct WinInfo {
     DWORD pid;
     std::wstring exe, title;
     int w, h;
+    bool minimized = false;
+};
+
+// janela que NAO entrou na lista e por que (so para diagnostico: "list --json --all")
+struct SkippedWin {
+    HWND hwnd;
+    DWORD pid;
+    std::wstring exe, title, why;
 };
 
 struct MonInfo {
@@ -133,29 +146,66 @@ static std::wstring exeNameOfPid(DWORD pid) {
     return r;
 }
 
-static std::vector<WinInfo> listWindows() {
+struct ListCtx {
+    std::vector<WinInfo>* out;
+    std::vector<SkippedWin>* skipped;
+};
+
+static bool coversAMonitor(const RECT& rc) {
+    bool yes = false;
+    struct Arg { const RECT* rc; bool* yes; } arg{ &rc, &yes };
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR, HDC, LPRECT m, LPARAM lp) -> BOOL {
+        auto* a = (Arg*)lp;
+        const RECT& r = *a->rc;
+        if (std::abs(r.left - m->left) <= 3 && std::abs(r.top - m->top) <= 3 && std::abs(r.right - m->right) <= 3 && std::abs(r.bottom - m->bottom) <= 3) *a->yes = true;
+        return TRUE;
+    }, (LPARAM)&arg);
+    return yes;
+}
+
+// Janelas que dao para transmitir. Jogos em tela cheia ficam MINIMIZADOS quando a pessoa vai ao Discord escolher a janela
+// (Alt+Tab), entao minimizadas tambem entram (a live comeca quando a janela voltar). Jogos sem titulo, em tela cheia, entram
+// com o nome do programa.
+static std::vector<WinInfo> listWindows(std::vector<SkippedWin>* skipped = nullptr) {
     std::vector<WinInfo> out;
     HWND self = GetConsoleWindow();
+    ListCtx ctx{ &out, skipped };
     EnumWindows([](HWND h, LPARAM lp) -> BOOL {
-        auto* v = (std::vector<WinInfo>*)lp;
-        if (!IsWindowVisible(h) || IsIconic(h)) return TRUE;
-        if (GetWindow(h, GW_OWNER)) return TRUE;
-        LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        if ((ex & WS_EX_TOOLWINDOW) && !(ex & WS_EX_APPWINDOW)) return TRUE;
-        int cloaked = 0;
-        DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked);
-        if (cloaked) return TRUE;
-        wchar_t t[512];
-        int len = GetWindowTextW(h, t, 512);
-        if (len <= 0) return TRUE;
-        RECT rc;
-        GetWindowRect(h, &rc);
-        if (rc.right - rc.left < 50 || rc.bottom - rc.top < 50) return TRUE;
+        auto* c = (ListCtx*)lp;
+        bool iconic = IsIconic(h) != 0;
+        if (!IsWindowVisible(h) && !iconic) return TRUE;
         DWORD pid = 0;
         GetWindowThreadProcessId(h, &pid);
-        v->push_back({ h, pid, exeNameOfPid(pid), std::wstring(t, len), rc.right - rc.left, rc.bottom - rc.top });
+        wchar_t t[512];
+        int len = GetWindowTextW(h, t, 512);
+        auto skip = [&](const wchar_t* why) {
+            if (c->skipped) c->skipped->push_back({ h, pid, exeNameOfPid(pid), std::wstring(t, std::max(0, len)), why });
+            return TRUE;
+        };
+        if (GetWindow(h, GW_OWNER)) return skip(L"tem dono (janela filha)");
+        LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        if ((ex & WS_EX_TOOLWINDOW) && !(ex & WS_EX_APPWINDOW)) return skip(L"janela de ferramenta");
+        int cloaked = 0;
+        DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cloaked, sizeof cloaked);
+        if (cloaked) return skip(L"oculta pelo Windows (outra area de trabalho virtual)");
+        RECT rc{};
+        if (iconic) {
+            WINDOWPLACEMENT wp{ sizeof wp };
+            if (GetWindowPlacement(h, &wp)) rc = wp.rcNormalPosition;
+        } else GetWindowRect(h, &rc);
+        int w = rc.right - rc.left, hh = rc.bottom - rc.top;
+        std::wstring title(t, std::max(0, len));
+        if (len <= 0) {
+            // sem titulo: so entra se parecer um jogo em tela cheia
+            if (!iconic && w >= 800 && hh >= 500 && coversAMonitor(rc)) title = exeNameOfPid(pid);
+            else return skip(L"sem titulo");
+        }
+        if (w < 50 || hh < 50) return skip(L"muito pequena");
+        WinInfo wi{ h, pid, exeNameOfPid(pid), title, w, hh };
+        wi.minimized = iconic;
+        c->out->push_back(wi);
         return TRUE;
-    }, (LPARAM)&out);
+    }, (LPARAM)&ctx);
     out.erase(std::remove_if(out.begin(), out.end(), [&](const WinInfo& w) { return w.hwnd == self; }), out.end());
     return out;
 }
@@ -172,14 +222,15 @@ static std::vector<MonInfo> listMonitors() {
     return out;
 }
 
-static void cmdList(bool json) {
-    auto ws = listWindows();
+static void cmdList(bool json, bool all = false) {
+    std::vector<SkippedWin> skipped;
+    auto ws = listWindows(all ? &skipped : nullptr);
     auto ms = listMonitors();
     if (json) {
         std::string o = "{\"windows\":[";
         for (size_t i = 0; i < ws.size(); i++) {
             char b[128];
-            snprintf(b, sizeof b, "%s{\"hwnd\":%llu,\"pid\":%lu,\"w\":%d,\"h\":%d,", i ? "," : "", (unsigned long long)(uintptr_t)ws[i].hwnd, ws[i].pid, ws[i].w, ws[i].h);
+            snprintf(b, sizeof b, "%s{\"hwnd\":%llu,\"pid\":%lu,\"w\":%d,\"h\":%d,\"min\":%s,", i ? "," : "", (unsigned long long)(uintptr_t)ws[i].hwnd, ws[i].pid, ws[i].w, ws[i].h, ws[i].minimized ? "true" : "false");
             o += b;
             o += "\"exe\":\"" + jsonEscape(toUtf8(ws[i].exe)) + "\",\"title\":\"" + jsonEscape(toUtf8(ws[i].title)) + "\"}";
         }
@@ -190,7 +241,18 @@ static void cmdList(bool json) {
             o += b;
             o += "\"name\":\"" + jsonEscape(toUtf8(ms[i].name)) + "\"}";
         }
-        o += "]}\n";
+        o += "]";
+        if (all) {
+            o += ",\"skipped\":[";
+            for (size_t i = 0; i < skipped.size(); i++) {
+                char b[96];
+                snprintf(b, sizeof b, "%s{\"hwnd\":%llu,\"pid\":%lu,", i ? "," : "", (unsigned long long)(uintptr_t)skipped[i].hwnd, skipped[i].pid);
+                o += b;
+                o += "\"exe\":\"" + jsonEscape(toUtf8(skipped[i].exe)) + "\",\"title\":\"" + jsonEscape(toUtf8(skipped[i].title)) + "\",\"why\":\"" + jsonEscape(toUtf8(skipped[i].why)) + "\"}";
+            }
+            o += "]";
+        }
+        o += "}\n";
         fputs(o.c_str(), stdout);
         return;
     }
@@ -200,6 +262,95 @@ static void cmdList(bool json) {
     say("MONITORES:\n");
     for (size_t i = 0; i < ms.size(); i++)
         say("  [m%zu] %s %ldx%ld%s\n", i + 1, toUtf8(ms[i].name).c_str(), ms[i].rc.right - ms[i].rc.left, ms[i].rc.bottom - ms[i].rc.top, ms[i].primary ? " (principal)" : "");
+}
+
+
+// ---------------------------------------------------------------- diagnostico: quem esta tocando som agora
+// "audio-sessions --root PID --json": lista os programas com som ativo, em qual saida de som, e se fazem parte do Discord
+// (PID = programa principal do Discord). Serve para descobrir por que a voz do Discord vaza para uma live de tela inteira:
+// programas de headset/teclado (Sonar, Nahimic, VoiceMeeter...) refazem o som do Discord e escapam da exclusao.
+
+static DWORD windowsBuild() {
+    typedef LONG(WINAPI* RtlGetVersionPtr)(PRTL_OSVERSIONINFOW);
+    auto fn = (RtlGetVersionPtr)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion");
+    RTL_OSVERSIONINFOW vi{};
+    vi.dwOSVersionInfoSize = sizeof vi;
+    if (fn && fn(&vi) == 0) return vi.dwBuildNumber;
+    return 0;
+}
+
+static std::map<DWORD, DWORD> parentMap() {
+    std::map<DWORD, DWORD> m;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return m;
+    PROCESSENTRY32W pe{ sizeof pe };
+    if (Process32FirstW(snap, &pe)) do { m[pe.th32ProcessID] = pe.th32ParentProcessID; } while (Process32NextW(snap, &pe));
+    CloseHandle(snap);
+    return m;
+}
+
+static std::set<DWORD> descendantsOf(DWORD root, const std::map<DWORD, DWORD>& parent) {
+    std::set<DWORD> out{ root };
+    bool grew = true;
+    while (grew) {
+        grew = false;
+        for (auto& kv : parent) if (!out.count(kv.first) && out.count(kv.second) && kv.first != kv.second) { out.insert(kv.first); grew = true; }
+    }
+    return out;
+}
+
+static int cmdAudioSessions(DWORD root) {
+    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+    auto parent = parentMap();
+    auto tree = root ? descendantsOf(root, parent) : std::set<DWORD>{};
+    std::string o = "{\"build\":" + std::to_string(windowsBuild()) + ",\"sessions\":[";
+    bool first = true;
+    ComPtr<IMMDeviceEnumerator> en;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en)))) {
+        ComPtr<IMMDeviceCollection> col;
+        if (SUCCEEDED(en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &col))) {
+            UINT n = 0;
+            col->GetCount(&n);
+            for (UINT i = 0; i < n; i++) {
+                ComPtr<IMMDevice> dev;
+                if (FAILED(col->Item(i, &dev))) continue;
+                std::wstring devName = L"?";
+                ComPtr<IPropertyStore> ps;
+                if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &ps))) {
+                    PROPVARIANT pv;
+                    PropVariantInit(&pv);
+                    if (SUCCEEDED(ps->GetValue(PKEY_Device_FriendlyName, &pv)) && pv.vt == VT_LPWSTR && pv.pwszVal) devName = pv.pwszVal;
+                    PropVariantClear(&pv);
+                }
+                ComPtr<IAudioSessionManager2> mgr;
+                if (FAILED(dev->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, (void**)&mgr))) continue;
+                ComPtr<IAudioSessionEnumerator> se;
+                if (FAILED(mgr->GetSessionEnumerator(&se))) continue;
+                int cnt = 0;
+                se->GetCount(&cnt);
+                for (int j = 0; j < cnt; j++) {
+                    ComPtr<IAudioSessionControl> sc;
+                    if (FAILED(se->GetSession(j, &sc))) continue;
+                    AudioSessionState st = AudioSessionStateInactive;
+                    sc->GetState(&st);
+                    ComPtr<IAudioSessionControl2> sc2;
+                    if (FAILED(sc.As(&sc2))) continue;
+                    DWORD pid = 0;
+                    sc2->GetProcessId(&pid);
+                    bool sys = sc2->IsSystemSoundsSession() == S_OK;
+                    DWORD par = parent.count(pid) ? parent[pid] : 0;
+                    char b[160];
+                    snprintf(b, sizeof b, "%s{\"pid\":%lu,\"parent\":%lu,\"active\":%s,\"system\":%s,\"inDiscord\":%s,", first ? "" : ",", pid, par, st == AudioSessionStateActive ? "true" : "false", sys ? "true" : "false", tree.count(pid) ? "true" : "false");
+                    first = false;
+                    o += b;
+                    o += "\"exe\":\"" + jsonEscape(toUtf8(pid ? exeNameOfPid(pid) : L"-")) + "\",\"parentExe\":\"" + jsonEscape(toUtf8(par ? exeNameOfPid(par) : L"-")) + "\",\"device\":\"" + jsonEscape(toUtf8(devName)) + "\"}";
+                }
+            }
+        }
+    }
+    o += "]}\n";
+    fputs(o.c_str(), stdout);
+    return 0;
 }
 
 // ---------------------------------------------------------------- audio (process loopback)
@@ -811,7 +962,7 @@ static int cmdThumbs(const std::wstring& out, UINT thumbW, bool doWin, bool doMo
     if (doWin) {
         for (auto& w : listWindows()) {
             std::wstring id = std::to_wstring((unsigned long long)(uintptr_t)w.hwnd);
-            add(L"w" + id, makeItem(w.hwnd, -1));
+            if (!w.minimized) add(L"w" + id, makeItem(w.hwnd, -1));
             if (icons) saveIconPng(exePathOfPid(w.pid), out + L"\\i" + id + L".png");
         }
     }
@@ -1318,6 +1469,9 @@ struct StreamOpts {
     DWORD pid = 0;          // audio only from this process tree
     DWORD excludePid = 0;   // or audio from everything except this process tree
     int threads = 3;
+    int testDrop = 0;           // so para teste: ignora os N primeiros quadros capturados
+    int testSizeBias = 0;       // so para teste: finge que o tamanho inicial era maior (simula janela que muda de tamanho)
+    bool testNoReuse = false;   // so para teste: desliga o reaproveitamento do quadro
     bool h264 = false;          // comprimir na placa de video (H.264) em vez de JPEG
     UINT bitrate = 12000000;
 };
@@ -1345,7 +1499,7 @@ static int runStream(StreamOpts o) {
     auto item = makeItem(o.hwnd, o.monitor);
     if (!item) { fputs("ERRO: fonte nao pode ser capturada\n", stderr); return 3; }
     auto size = item.Size();
-    UINT W = size.Width, H = size.Height;
+    UINT W = size.Width + (UINT)o.testSizeBias, H = size.Height;
     ComPtr<ID3D11Texture2D> staging = makeStaging(g, W, H);
 
     std::atomic<bool> running{ true };
@@ -1425,9 +1579,12 @@ static int runStream(StreamOpts o) {
     std::mutex mtx;
     double lastEmit = 0;
     // ultimo quadro entregue ao codificador (para reenviar quando a janela fica parada)
-    ID3D11Texture2D* lastNv12 = nullptr;
+    ID3D11Texture2D* lastNv12 = nullptr; // aponta para lastFrameTex
+    ComPtr<ID3D11Texture2D> lastFrameTex; // copia do ultimo quadro ja convertido (mesmo tamanho de saida, nao muda com a janela)
     LONGLONG lastNv12Ts = 0;
     double lastSubmitAt = 0;
+    bool testNoReuse = o.testNoReuse; // so para teste: comportamento antigo (descartar o quadro quando o tamanho muda)
+    int testDrop = o.testDrop; // so para teste: ignora os primeiros quadros, simulando uma captura que nao entrega
     const double minGap = 1.0 / o.fps - 0.002;
     wgc::Direct3D11CaptureFramePool pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(g.d3d, wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
     pool.FrameArrived([&](wgc::Direct3D11CaptureFramePool const& sender, winrt::Windows::Foundation::IInspectable const&) {
@@ -1435,11 +1592,38 @@ static int runStream(StreamOpts o) {
         if (!frame || !running) return;
         std::lock_guard<std::mutex> lk(mtx);
         auto cs = frame.ContentSize();
+        if (testDrop > 0) { testDrop--; return; }
         if ((UINT)cs.Width != W || (UINT)cs.Height != H) {
             if (cs.Width < 2 || cs.Height < 2) return;
+            fprintf(stderr, "tamanho mudou %ux%u -> %ux%u\n", W, H, (UINT)cs.Width, (UINT)cs.Height);
+            // o conversor vai ser recriado, mas o ultimo quadro continua guardado em lastFrameTex e segue sendo reenviado
             W = cs.Width; H = cs.Height;
             staging = makeStaging(g, W, H);
             if (gpuMode) { std::string e; conv.init(g, W, H, OW, OH, (UINT)o.fps, e); }
+            // Janela parada nao manda outro quadro depois desta mudanca; se descartasse este, a live ficaria sem imagem ate
+            // a janela mexer. Entao, se o quadro atual ja cobre o novo tamanho, ele e usado (recortado pelo conversor).
+            if (gpuMode && !testNoReuse) {
+                ComPtr<ID3D11Texture2D> mt;
+                auto ma = frame.Surface().as<IDirect3DDxgiInterfaceAccess>();
+                D3D11_TEXTURE2D_DESC md{};
+                if (SUCCEEDED(ma->GetInterface(IID_PPV_ARGS(&mt)))) {
+                    mt->GetDesc(&md);
+                    {
+                        // janela que diminuiu: o quadro cobre tudo; que cresceu: so tem o conteudo antigo (melhor que ficar sem imagem)
+                        UINT uw = std::min(md.Width, (UINT)cs.Width), uh = std::min(md.Height, (UINT)cs.Height);
+                        LONGLONG mts = frame.SystemRelativeTime().count();
+                        if (firstTs < 0) firstTs = mts;
+                        ID3D11Texture2D* mnv = conv.convert(g, mt.Get(), uw, uh);
+                        if (mnv) {
+                            if (!lastFrameTex) { D3D11_TEXTURE2D_DESC ld{}; mnv->GetDesc(&ld); g.dev->CreateTexture2D(&ld, nullptr, &lastFrameTex); }
+                            if (lastFrameTex) { g.ctx->CopyResource(lastFrameTex.Get(), mnv); lastNv12 = lastFrameTex.Get(); }
+                            lastNv12Ts = mts - firstTs; lastSubmitAt = nowSec(); lastEmit = lastSubmitAt;
+                            enc.submit(mnv, mts - firstTs);
+                            fprintf(stderr, "quadro aproveitado apos mudar o tamanho\n");
+                        }
+                    }
+                }
+            }
             pool.Recreate(g.d3d, wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, cs);
             return;
         }
@@ -1454,7 +1638,9 @@ static int runStream(StreamOpts o) {
             if (firstTs < 0) firstTs = ts;
             ID3D11Texture2D* nv12 = conv.convert(g, gtex.Get(), (UINT)cs.Width, (UINT)cs.Height);
             if (nv12) {
-                lastNv12 = nv12; lastNv12Ts = ts - firstTs; lastSubmitAt = now;
+                if (!lastFrameTex) { D3D11_TEXTURE2D_DESC ld{}; nv12->GetDesc(&ld); g.dev->CreateTexture2D(&ld, nullptr, &lastFrameTex); }
+                if (lastFrameTex) { g.ctx->CopyResource(lastFrameTex.Get(), nv12); lastNv12 = lastFrameTex.Get(); }
+                lastNv12Ts = ts - firstTs; lastSubmitAt = now;
                 enc.submit(nv12, ts - firstTs);
             }
             return;
@@ -1577,14 +1763,19 @@ static int runStream(StreamOpts o) {
         idleThread = std::thread([&] {
             while (running) {
                 Sleep(60);
-                std::lock_guard<std::mutex> lk(mtx);
-                if (!lastNv12 || !running) continue;
-                double now = nowSec();
-                double idle = now - lastSubmitAt;
-                if (idle < (enc.forceKey.load() ? 0.12 : 1.0)) continue;
-                lastNv12Ts += (LONGLONG)(idle * 1e7);
-                lastSubmitAt = now;
-                enc.submit(lastNv12, lastNv12Ts);
+                {
+                    std::lock_guard<std::mutex> lk(mtx);
+                    if (!running) break;
+                    double now = nowSec();
+                    if (lastNv12) {
+                        double idle = now - lastSubmitAt;
+                        if (idle >= (enc.forceKey.load() ? 0.12 : 1.0)) {
+                            lastNv12Ts += (LONGLONG)(idle * 1e7);
+                            lastSubmitAt = now;
+                            enc.submit(lastNv12, lastNv12Ts);
+                        }
+                    }
+                }
             }
         });
     }
@@ -1767,7 +1958,9 @@ static int cmdRect(HWND hwnd, int monitor) {
                 RECT rc{};
                 int cloaked = 0;
                 DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof cloaked);
-                if (IsIconic(hwnd) || !IsWindowVisible(hwnd) || cloaked || FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof rc)))
+                // jogos em tela cheia as vezes nao devolvem os limites do DWM: cai para o retangulo normal da janela
+                bool gotRect = SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rc, sizeof rc)) || GetWindowRect(hwnd, &rc);
+                if (IsIconic(hwnd) || !IsWindowVisible(hwnd) || cloaked || !gotRect || rc.right - rc.left < 2)
                     snprintf(b, sizeof b, "{\"hidden\":1}\n");
                 else
                     snprintf(b, sizeof b, "{\"x\":%ld,\"y\":%ld,\"w\":%ld,\"h\":%ld}\n", rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top);
@@ -1792,7 +1985,11 @@ int wmain(int argc, wchar_t** argv) {
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     if (argc < 2) { say("uso: golive-helper list | capture ... | interactive\n"); return 1; }
     std::wstring cmd = argv[1];
-    if (cmd == L"list") return cmdList(argc > 2 && std::wstring(argv[2]) == L"--json"), 0;
+    if (cmd == L"list") {
+        bool json = false, all = false;
+        for (int i = 2; i < argc; i++) { std::wstring a = argv[i]; if (a == L"--json") json = true; else if (a == L"--all") all = true; }
+        return cmdList(json, all), 0;
+    }
     if (cmd == L"thumbs") {
         std::wstring out = L"thumbs";
         UINT tw = 320;
@@ -1824,6 +2021,9 @@ int wmain(int argc, wchar_t** argv) {
             else if (a == L"--codec") o.h264 = next() == L"h264";
             else if (a == L"--bitrate") o.bitrate = (UINT)_wtoi(next().c_str());
             else if (a == L"--cursor") o.cursor = toUtf8(next());
+            else if (a == L"--test-drop") o.testDrop = _wtoi(next().c_str());
+            else if (a == L"--test-size-bias") o.testSizeBias = _wtoi(next().c_str());
+            else if (a == L"--test-no-reuse") o.testNoReuse = true;
         }
         return runStream(o);
     }
@@ -1836,6 +2036,11 @@ int wmain(int argc, wchar_t** argv) {
             else if (a == L"--monitor" && i + 1 < argc) mon = _wtoi(argv[++i]);
         }
         return cmdRect(hw, mon);
+    }
+    if (cmd == L"audio-sessions") {
+        DWORD root = 0;
+        for (int i = 2; i < argc; i++) { std::wstring a = argv[i]; if (a == L"--root" && i + 1 < argc) root = (DWORD)_wtoi(argv[++i]); }
+        return cmdAudioSessions(root);
     }
     if (cmd == L"gpus") return cmdGpus();
     if (cmd == L"hwtest") return cmdHwTest(argc > 2 ? argv[2] : L"hwtest.mp4");

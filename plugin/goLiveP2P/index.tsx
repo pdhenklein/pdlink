@@ -6,6 +6,7 @@ import definePlugin, { PluginNative } from "@utils/types";
 import { ContextMenuApi, Menu, ScrollerThin, SelectedChannelStore, useEffect, useRef, useState } from "@webpack/common";
 
 import { FilesButton } from "./files";
+import { UpdateCountdown } from "./updateUi";
 import { getWatchUrl, startManager, stopManager } from "./manager";
 import { Settings } from "@api/Settings";
 import { settings } from "./settings";
@@ -16,12 +17,15 @@ const Native = VencordNative.pluginHelpers.pdLink as PluginNative<typeof import(
 let updateTimer: ReturnType<typeof setInterval> | undefined;
 let updateShown = "";
 
-// avisa uma vez quando uma versao nova ja foi baixada (ela entra em uso quando o Discord abrir de novo)
+// avisa uma vez quando uma versao nova ja foi baixada; o botao instala na hora (ou entra em uso quando o Discord abrir de novo)
 async function checkUpdateReady() {
     const u = await Native.updateStatus().catch(() => null);
     if (!u?.ready || u.ready === updateShown) return;
     updateShown = u.ready;
-    showNotice(`pdLink ${u.ready} foi baixado. Ele passa a valer da proxima vez que voce fechar e abrir o Discord.`, "OK", () => { });
+    const version = u.ready;
+    showNotice(`pdLink ${version} esta pronto.`, "Atualizar", () => {
+        showNotice(<UpdateCountdown version={version} inCall={!!SelectedChannelStore.getVoiceChannelId()} restart={() => Native.updateRestart()} />, "Cancelar", () => { });
+    });
 }
 
 // O mod se chamava GoLiveP2P: leva para o nome novo o que a pessoa ja tinha escolhido (cor, resolucao...), uma vez so
@@ -41,7 +45,7 @@ function migrateLegacySettings() {
 type Tab = "apps" | "screens" | "devices";
 
 interface Sources {
-    windows: { hwnd: number; pid: number; title: string; exe: string; w: number; h: number; thumb: string | null; icon: string | null; }[];
+    windows: { hwnd: number; pid: number; title: string; exe: string; w: number; h: number; min?: boolean; thumb: string | null; icon: string | null; }[];
     monitors: { index: number; w: number; h: number; primary: boolean; thumb: string | null; }[];
 }
 
@@ -314,6 +318,7 @@ function LiveModal({ modalProps }: { modalProps: any; }) {
                         {tab === "apps" && sources?.windows.map(w => (
                             <SourceCard
                                 key={w.hwnd} title={w.title} icon={w.icon} thumb={w.thumb}
+                                fallback={w.min ? "Minimizada: a live começa quando a janela voltar" : undefined}
                                 onShare={() => share({ kind: "window", hwnd: w.hwnd, pid: w.pid, label: w.title })}
                             />
                         ))}

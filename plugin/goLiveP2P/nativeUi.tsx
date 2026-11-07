@@ -1,6 +1,7 @@
 import { findByProps, findStore } from "@webpack";
 import { ChannelStore, FluxDispatcher, SelectedChannelStore, UserStore, useEffect, useRef } from "@webpack/common";
 
+import { pickSink } from "./audioSink";
 import { getLive } from "./live";
 import { MarkLayer } from "./marks";
 
@@ -113,6 +114,18 @@ function overlayMap(m: any) {
 interface VolumeStore {
     getLocalVolume(userId: string, ctx: string): number;
     isLocalMute(userId: string, ctx: string): boolean;
+    getOutputDeviceId?(): string;
+    getOutputDevices?(): Record<string, { id?: string; name?: string; }>;
+}
+
+/** Toca a live na saida de som escolhida nas configuracoes de voz do Discord (e nao so na padrao do Windows). */
+async function applyOutputDevice(v: HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string; }, media: VolumeStore) {
+    if (typeof v.setSinkId !== "function") return;
+    try {
+        const list = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audiooutput");
+        const want = pickSink(media.getOutputDeviceId?.(), media.getOutputDevices?.(), list);
+        if ((v.sinkId ?? "") !== want) await v.setSinkId(want);
+    } catch { }
 }
 
 /** Aplica ao <video> o volume e o "silenciar" que o usuario escolheu nos controles nativos da transmissao. */
@@ -133,10 +146,15 @@ function P2PVideo(props: any) {
         const media = stores.MediaEngineStore;
         if (!v || !media || streamId === LOCAL_VIDEO_ID) return;
         const uid = String(streamId).slice(REMOTE_PREFIX.length);
-        const apply = () => { try { applyLocalAudio(v, media, uid); } catch { } };
+        const apply = () => {
+            try { applyLocalAudio(v, media, uid); } catch { }
+            applyOutputDevice(v as any, media);
+        };
         apply();
         media.addChangeListener(apply);
-        return () => media.removeChangeListener(apply);
+        // trocar ou ligar/desligar um dispositivo de som no Windows tambem muda a lista
+        navigator.mediaDevices?.addEventListener?.("devicechange", apply);
+        return () => { media.removeChangeListener(apply); navigator.mediaDevices?.removeEventListener?.("devicechange", apply); };
     }, [streamId]);
     useEffect(() => {
         const v = ref.current;

@@ -308,7 +308,8 @@ function syncLive() {
             if (!hub || !getLive().running) return;
             try {
                 const rows = await hub.stats();
-                if (rows.length) await saveProbe("webrtc-stats.json", JSON.stringify({ at: new Date().toISOString(), rows, audio: getLive().audioState(), perf: getLive().perf, video: { modo: getLive().videoMode, config: getLive().videoConfig, codificador: getLive().encoderName }, codecs: videoCodecs(), encoderCaps }, null, 1));
+                const helperStatus = await (Native as any).status?.().catch?.(() => null);
+                if (rows.length) await saveProbe("webrtc-stats.json", JSON.stringify({ at: new Date().toISOString(), rows, audio: getLive().audioState(), perf: getLive().perf, video: { modo: getLive().videoMode, config: getLive().videoConfig, codificador: getLive().encoderName }, codecs: videoCodecs(), encoderCaps, helper: helperStatus }, null, 1));
             } catch { }
         }, 5000);
     } else if (!live.running && statsTimer) {

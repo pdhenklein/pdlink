@@ -19,7 +19,7 @@ mkdir -p "$REL"
 
 cp "$OUT/patcher.js" "$OUT/preload.js" "$OUT/renderer.js" "$OUT/renderer.css" "$REL/"
 cp ../Vencord/src/userplugins/goLiveP2P/viewer.html ../Vencord/src/userplugins/goLiveP2P/viewer-hw.js "$REL/"
-cp ../helper/bin/golive-helper-p8.exe "$REL/golive-helper.exe"
+cp ../helper/bin/golive-helper-p15.exe "$REL/golive-helper.exe"
 printf "%s" "$VER" > "$REL/version.txt"
 
 # 3. carregador que fica no lugar do app.asar do Discord

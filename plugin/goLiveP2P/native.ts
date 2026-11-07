@@ -9,6 +9,7 @@ import { join } from "path";
 
 import { closeAll, closeFile, openFile, reveal, saveDialog, writeFile } from "./fileNative";
 import { overlayInfo, sendOverlay, showToast, startOverlay, stopOverlay } from "./overlay";
+import { discordUpdateExe, relaunchAfterExit } from "./updateRestart";
 
 // Brokers MQTT publicos usados so para sinalizacao (textos de conexao e quem esta ao vivo); o video nunca passa por la
 CspPolicies["wss://broker.emqx.io:8084"] = ConnectSrc;
@@ -20,7 +21,7 @@ const PKG_DIR = __dirname;
 const PACKAGED = existsSync(join(PKG_DIR, "golive-helper.exe"));
 const VIEWER_PAGE = PACKAGED ? join(PKG_DIR, "viewer.html") : "F:/Discord2/Vencord/src/userplugins/goLiveP2P/viewer.html";
 const WATCH_PORT = 47615;
-const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p8.exe";
+const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p15.exe";
 // relatorios de diagnostico: no pacote ficam na pasta de dados do usuario
 const PROBE_DIR = PACKAGED ? join(PKG_DIR, "..", "logs") : "F:/Discord2/probe";
 
@@ -60,9 +61,22 @@ export interface SourcesQuery {
     icons?: boolean;
 }
 
+let lastWindowDiag = "";
+
 export async function getSources(_: IpcMainInvokeEvent, q: SourcesQuery = {}) {
     if (!existsSync(HELPER)) throw new Error("Auxiliar nao encontrado em " + HELPER);
-    const list = JSON.parse(await run(["list", "--json"]));
+    const list = JSON.parse(await run(["list", "--json", "--all"]));
+    // diagnostico: quais janelas ficaram de fora da lista e por que (ajuda quando um jogo "nao aparece")
+    try {
+        const diag = JSON.stringify({ at: new Date().toISOString(), naLista: list.windows.map((w: any) => `${w.exe} | ${w.title}${w.min ? " (minimizada)" : ""}`), ignoradas: list.skipped });
+        const key = diag.replace(/"at":"[^"]*",/, "");
+        if (key !== lastWindowDiag) {
+            lastWindowDiag = key;
+            const { mkdirSync, writeFileSync } = require("fs") as typeof import("fs");
+            mkdirSync(PROBE_DIR, { recursive: true });
+            writeFileSync(join(PROBE_DIR, "janelas-ignoradas.json"), diag, "utf8");
+        }
+    } catch { }
     const dir = mkdtempSync(join(tmpdir(), "golive-"));
     try {
         const args = ["thumbs", "--out", dir, "--w", "320", "--icons", q.icons === false ? "0" : "1"];
@@ -86,7 +100,7 @@ export async function getSources(_: IpcMainInvokeEvent, q: SourcesQuery = {}) {
         }
     };
     // janelas que o seletor nativo do Discord nao mostra
-    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "golive-helper-p8.exe", "whatsapp.root.exe", "whatsapp.exe"]);
+    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "golive-helper-p8.exe", "golive-helper-p12.exe", "golive-helper-p13.exe", "golive-helper-p14.exe", "golive-helper-p15.exe", "whatsapp.root.exe", "whatsapp.exe"]);
     list.windows = list.windows.filter((w: any) => !hidden.has(String(w.exe).toLowerCase()));
     const windows = list.windows.map((w: any) => ({ ...w, thumb: thumb("w" + w.hwnd), icon: icon("i" + w.hwnd) }));
     const monitors = list.monitors.map((m: any) => ({ ...m, thumb: thumb("m" + m.index) }));
@@ -175,6 +189,13 @@ export async function startStream(_: IpcMainInvokeEvent, o: StreamOpts) {
 
     const proc = spawn(HELPER, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     helper = proc;
+    // Tela inteira com som: anota quem esta tocando som e se faz parte do Discord. Se a voz do Discord vazar na live, este arquivo
+    // (audio-sessoes.json, na pasta de logs) mostra qual programa esta refazendo o som do Discord.
+    if (o.audio !== false && o.hwnd == null) {
+        setTimeout(() => {
+            run(["audio-sessions", "--root", String(process.pid)]).then(t => writeProbe("audio-sessoes.json", t)).catch(() => { });
+        }, 4000);
+    }
     let buf = Buffer.alloc(0);
     proc.stdout!.on("data", (chunk: Buffer) => {
         buf = buf.length ? Buffer.concat([buf, chunk]) : chunk;
@@ -253,7 +274,7 @@ app.on("before-quit", () => {
     server?.close();
 });
 
-export function saveProbe(_: IpcMainInvokeEvent, name: string, data: string) {
+function writeProbe(name: string, data: string) {
     try {
         const { mkdirSync, writeFileSync } = require("fs") as typeof import("fs");
         mkdirSync(PROBE_DIR, { recursive: true });
@@ -262,6 +283,10 @@ export function saveProbe(_: IpcMainInvokeEvent, name: string, data: string) {
     } catch (e) {
         return "erro: " + String(e);
     }
+}
+
+export function saveProbe(_: IpcMainInvokeEvent, name: string, data: string) {
+    return writeProbe(name, data);
 }
 
 export function takeFlag(_: IpcMainInvokeEvent, name: string) {
@@ -344,4 +369,21 @@ if (PACKAGED) {
 
 export function updateStatus(_: IpcMainInvokeEvent) {
     return update;
+}
+
+/**
+ * Botao "Atualizar": fecha o Discord e abre de novo. A versao ja baixada em "pending" e instalada pelo carregador na abertura.
+ * Devolve "ok" ou o motivo de nao ter feito nada.
+ */
+export function updateRestart(_: IpcMainInvokeEvent) {
+    if (!PACKAGED) return "so na versao instalada";
+    const ready = readVersion(PENDING_DIR);
+    if (!ready || !newer(ready, readVersion(PKG_DIR))) return "nao ha atualizacao baixada";
+    if (!relaunchAfterExit(discordUpdateExe(), 5)) return "nao achei o Discord para reabrir";
+    // da um instante para a resposta voltar a tela e fecha de vez (nao so minimiza para a bandeja)
+    setTimeout(() => {
+        app.quit(); // fecha com a limpeza normal (para o auxiliar, fecha arquivos)...
+        setTimeout(() => app.exit(0), 2500); // ...e garante que fechou mesmo se o Discord so tentar ir para a bandeja
+    }, 400);
+    return "ok";
 }
