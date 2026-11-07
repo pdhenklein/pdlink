@@ -326,30 +326,42 @@ function newer(a: string, b: string) {
     return false;
 }
 
+// Pergunta ao GitHub qual e a versao mais nova SEM usar a API (ela limita a 60 consultas por hora): o endereco
+// "releases/latest" so redireciona para a tag mais nova, e os downloads diretos tambem nao entram nesse limite.
+async function latestVersion() {
+    const r = await fetch(`https://github.com/${REPO}/releases/latest`, { redirect: "manual", headers: { "User-Agent": "pdLink" } });
+    const m = /\/releases\/tag\/v?([0-9][^/?#]*)/.exec(r.headers.get("location") || "");
+    if (!m) throw new Error("nao achei a versao mais nova (GitHub respondeu " + r.status + ")");
+    return m[1];
+}
+
+const UPDATE_FILES = ["patcher.js", "preload.js", "renderer.js", "renderer.css", "golive-helper.exe", "viewer.html", "viewer-hw.js"];
+const UPDATE_REQUIRED = ["patcher.js", "preload.js", "renderer.js", "golive-helper.exe", "viewer.html"];
+let updating = false, failedVer = "", failedAt = 0;
+
 async function checkUpdate() {
-    if (!PACKAGED) return;
+    if (!PACKAGED || updating) return;
+    updating = true;
     const fs = require("original-fs") as typeof import("fs");
     try {
         update.current = readVersion(PKG_DIR);
-        const known = readVersion(PENDING_DIR);
-        const res = await fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { "User-Agent": "pdLink" } });
-        if (!res.ok) throw new Error("GitHub respondeu " + res.status);
-        const rel = await res.json() as { tag_name: string; assets: { name: string; browser_download_url: string; }[]; };
-        const ver = rel.tag_name.replace(/^v/, "");
+        const ver = await latestVersion();
         if (!newer(ver, update.current)) return;
-        if (known === ver) { update.ready = ver; return; }
+        if (readVersion(PENDING_DIR) === ver) { update.ready = ver; return; }
+        if (failedVer === ver && Date.now() - failedAt < 60_000) return;
 
         const tmp = PENDING_DIR + ".tmp";
         fs.rmSync(tmp, { recursive: true, force: true });
         fs.mkdirSync(tmp, { recursive: true });
-        for (const a of rel.assets) {
-            // instalador e carregador nao fazem parte da pasta do plugin
-            if (a.name === "version.txt" || a.name.endsWith(".asar") || a.name.endsWith(".exe") && a.name !== "golive-helper.exe") continue;
-            const r = await fetch(a.browser_download_url, { headers: { "User-Agent": "pdLink" } });
-            if (!r.ok) throw new Error(`falha ao baixar ${a.name}: ${r.status}`);
-            fs.writeFileSync(join(tmp, a.name), Buffer.from(await r.arrayBuffer()));
+        for (const name of UPDATE_FILES) {
+            const r = await fetch(`https://github.com/${REPO}/releases/download/v${ver}/${name}`, { headers: { "User-Agent": "pdLink" } });
+            if (!r.ok) {
+                if (UPDATE_REQUIRED.includes(name)) throw new Error(`falha ao baixar ${name}: ${r.status}`);
+                continue;
+            }
+            fs.writeFileSync(join(tmp, name), Buffer.from(await r.arrayBuffer()));
         }
-        for (const f of ["patcher.js", "preload.js", "renderer.js", "golive-helper.exe", "viewer.html"])
+        for (const f of UPDATE_REQUIRED)
             if (!fs.existsSync(join(tmp, f))) throw new Error("versao nova incompleta, falta " + f);
         // version.txt por ultimo: e ele que diz ao carregador que a pasta esta completa
         fs.writeFileSync(join(tmp, "version.txt"), ver);
@@ -359,12 +371,17 @@ async function checkUpdate() {
         update.error = "";
     } catch (e) {
         update.error = String(e);
+        try { failedVer = await latestVersion(); } catch { }
+        failedAt = Date.now();
+    } finally {
+        updating = false;
     }
 }
 
+// a cada 1 minuto (e logo ao abrir): a faixa "Atualizar" aparece poucos segundos depois de uma versao sair no GitHub
 if (PACKAGED) {
-    setTimeout(checkUpdate, 15_000);
-    setInterval(checkUpdate, 3 * 60 * 60_000);
+    setTimeout(checkUpdate, 5_000);
+    setInterval(checkUpdate, 60_000);
 }
 
 export function updateStatus(_: IpcMainInvokeEvent) {

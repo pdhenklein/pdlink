@@ -529,8 +529,8 @@ export default definePlugin({
         migrateLegacySettings();
         createPill();
         startManager();
-        updateTimer = setInterval(checkUpdateReady, 10 * 60_000);
-        setTimeout(checkUpdateReady, 60_000);
+        updateTimer = setInterval(checkUpdateReady, 5_000);
+        setTimeout(checkUpdateReady, 8_000);
     },
 
     stop() {
