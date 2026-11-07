@@ -368,6 +368,10 @@ if (PACKAGED) {
 }
 
 export function updateStatus(_: IpcMainInvokeEvent) {
+    if (PACKAGED) {
+        update.current = readVersion(PKG_DIR);
+        update.ready = update.ready || (newer(readVersion(PENDING_DIR), update.current) ? readVersion(PENDING_DIR) : "");
+    }
     return update;
 }
 

@@ -1,10 +1,13 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
 
+import { VersionInfo } from "./versionInfo";
+
 // Preferencias do mod. O Vencord grava isto no arquivo settings.json dentro da pasta de dados
 // (no instalado: %LOCALAPPDATA%\GoLiveP2P\data\settings; a pasta mantem o nome antigo para nao quebrar quem ja instalou), que NAO e mexida nas atualizacoes do mod.
 // Sao opcoes ocultas: nao aparecem na tela de plugins, so guardam o que a pessoa escolheu.
 export const settings = definePluginSettings({
+    version: { type: OptionType.COMPONENT, component: VersionInfo },
     markColor: { type: OptionType.STRING, description: "Cor do ping e do desenho", default: "#3b82f6", hidden: true },
     markWidth: { type: OptionType.NUMBER, description: "Espessura do traco", default: 6, hidden: true },
     preset: { type: OptionType.STRING, description: "Modo de transmissao", default: "custom", hidden: true },
