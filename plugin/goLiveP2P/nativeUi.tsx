@@ -28,6 +28,7 @@ const originals = new Map<string, Function>();
 const log: string[] = [];
 let stores: Record<string, any> = {};
 let interceptor: ((a: any) => boolean) | null = null;
+const pendingUnwatch = new Map<string, ReturnType<typeof setTimeout>>();
 
 export const callbacks = {
     watch: (_userId: string) => { },
@@ -138,9 +139,53 @@ export function applyLocalAudio(v: { volume: number; muted: boolean; }, media: V
     v.muted = !!media.isLocalMute(userId, "stream");
 }
 
+// Ao ir para tela cheia (ou trocar o layout), o Discord desmonta o quadro da live e monta outro. Um <video> novo comeca vazio
+// e so fica "pronto" quando chega um quadro novo: com a tela de quem transmite parada, isso demora ou nunca acontece (carregando
+// para sempre). Entao o <video> de cada live e guardado e so muda de lugar; ele so e descartado se ninguem o usar por 5 s.
+const keptVideos = new Map<string, { v: HTMLVideoElement; busy: boolean; drop?: ReturnType<typeof setTimeout>; }>();
+
+function takeVideo(streamId: string) {
+    let k = keptVideos.get(streamId);
+    if (k?.busy) return { v: document.createElement("video"), kept: false }; // o mesmo fluxo em dois quadros ao mesmo tempo
+    if (!k) {
+        k = { v: document.createElement("video"), busy: false };
+        keptVideos.set(streamId, k);
+    }
+    clearTimeout(k.drop);
+    k.busy = true;
+    return { v: k.v, kept: true };
+}
+
+function releaseVideo(streamId: string, v: HTMLVideoElement, kept: boolean) {
+    v.remove();
+    const k = keptVideos.get(streamId);
+    if (!kept || k?.v !== v) { v.srcObject = null; return; }
+    k.busy = false;
+    k.drop = setTimeout(() => {
+        if (k.busy) return;
+        v.srcObject = null;
+        keptVideos.delete(streamId);
+    }, 5000);
+}
+
 function P2PVideo(props: any) {
     const { className, onResize, onReady, streamId } = props;
-    const ref = useRef<HTMLVideoElement>(null);
+    const host = useRef<HTMLDivElement>(null);
+    const ref = useRef<HTMLVideoElement | null>(null);
+    const slot = useRef<{ v: HTMLVideoElement; kept: boolean; } | null>(null);
+    if (!slot.current) slot.current = takeVideo(String(streamId));
+    ref.current = slot.current.v;
+    useEffect(() => {
+        if (!slot.current) {
+            slot.current = takeVideo(String(streamId));
+            ref.current = slot.current.v;
+        }
+        const s = slot.current;
+        return () => { releaseVideo(String(streamId), s.v, s.kept); slot.current = null; };
+    }, [streamId]);
+    useEffect(() => {
+        if (ref.current) ref.current.className = className ?? "";
+    }, [className]);
     useEffect(() => {
         const v = ref.current;
         const media = stores.MediaEngineStore;
@@ -158,26 +203,40 @@ function P2PVideo(props: any) {
     }, [streamId]);
     useEffect(() => {
         const v = ref.current;
-        if (!v) return;
-        if (streamId === LOCAL_VIDEO_ID) v.srcObject = new MediaStream([getLive().getVideoTrack()]);
-        else v.srcObject = liveUsers.get(String(streamId).slice(REMOTE_PREFIX.length))?.stream ?? null;
+        const box = host.current;
+        if (!v || !box) return;
+        v.className = className ?? "";
+        v.playsInline = true;
+        v.autoplay = true;
+        box.appendChild(v);
+        const local = streamId === LOCAL_VIDEO_ID;
+        if (local) {
+            v.muted = true;
+            const track = getLive().getVideoTrack();
+            const cur = v.srcObject as MediaStream | null;
+            if (!cur || cur.getVideoTracks()[0] !== track) v.srcObject = new MediaStream([track]);
+        } else {
+            const want = liveUsers.get(String(streamId).slice(REMOTE_PREFIX.length))?.stream ?? null;
+            if (v.srcObject !== want) v.srcObject = want;
+        }
         v.play().catch(() => { });
         const size = () => { if (v.videoWidth) onResize?.({ width: v.videoWidth, height: v.videoHeight }); };
         const ready = () => { size(); onReady?.(); };
         v.addEventListener("loadedmetadata", size);
         v.addEventListener("resize", size);
         v.addEventListener("playing", ready);
+        // o mesmo <video> voltando de outro quadro ja tem imagem: avisa "pronto" na hora, sem esperar um quadro novo
+        if (v.videoWidth > 0) ready();
         return () => {
             v.removeEventListener("loadedmetadata", size);
             v.removeEventListener("resize", size);
             v.removeEventListener("playing", ready);
-            v.srcObject = null;
         };
     }, [streamId]);
     const remote = typeof streamId === "string" && streamId.startsWith(REMOTE_PREFIX);
     return (
         <>
-            <video ref={ref} className={className} muted={streamId === LOCAL_VIDEO_ID} playsInline autoPlay />
+            <div ref={host} style={{ display: "contents" }} />
             {remote && <MarkLayer video={ref} ownerId={String(streamId).slice(REMOTE_PREFIX.length)} />}
         </>
     );
@@ -190,7 +249,7 @@ function wrapVideoComponent(Orig: any) {
     if (!W) {
         W = function GoLiveVideo(props: any) {
             const id = props?.streamId;
-            if (id === LOCAL_VIDEO_ID || (typeof id === "string" && id.startsWith(REMOTE_PREFIX))) return <P2PVideo {...props} />;
+            if (id === LOCAL_VIDEO_ID || (typeof id === "string" && id.startsWith(REMOTE_PREFIX))) return <P2PVideo key={id} {...props} />;
             return <Orig {...props} />;
         };
         wrappedVideo.set(Orig, W);
@@ -340,11 +399,22 @@ export function installNativeUi() {
         const e = entryForKey(a.streamKey);
         if (!e) return false;
         if (a.type === "STREAM_WATCH") {
-            if (!e.local) queueMicrotask(() => callbacks.watch(e.userId));
+            note(`${a.type} ${e.userId}`);
+            if (!e.local) {
+                // um "parar" logo antes (troca de layout, tela cheia) e cancelado: a conexao continua, sem reconectar
+                clearTimeout(pendingUnwatch.get(e.userId));
+                pendingUnwatch.delete(e.userId);
+                queueMicrotask(() => callbacks.watch(e.userId));
+            }
             return true;
         }
         if (a.type === "STREAM_STOP" || a.type === "STREAM_CLOSE" || a.type === "STREAM_DELETE") {
-            queueMicrotask(() => (e.local ? getLive().stop() : callbacks.unwatch(e.userId)));
+            note(`${a.type} ${e.userId}`);
+            if (e.local) queueMicrotask(() => getLive().stop());
+            else {
+                clearTimeout(pendingUnwatch.get(e.userId));
+                pendingUnwatch.set(e.userId, setTimeout(() => { pendingUnwatch.delete(e.userId); callbacks.unwatch(e.userId); }, 1500));
+            }
             return true;
         }
         return false;
