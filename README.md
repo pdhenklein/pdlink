@@ -6,9 +6,7 @@ Live no Discord sem passar pelos servidores do Discord: a imagem vai direto do s
 - O visual e o do proprio Discord: botao de transmitir, "AO VIVO" ao lado do nome, quadro da live na call e menus de qualidade.
 - **Ping e desenho:** quem assiste aponta e desenha na tela de quem transmite (clique com o botao do meio do mouse pinga na hora).
 - **Arquivos sem limite de tamanho:** o clipe, a esquerda dos botoes da call, envia arquivos direto de um PC para o outro. Funciona com ou sem live.
-- **Ping e desenho:** quem assiste aponta e desenha na tela de quem transmite (clique com o botao do meio do mouse pinga na hora).
-- **Arquivos sem limite de tamanho:** o clipe, a esquerda dos botoes da call, envia arquivos direto de um PC para o outro. Funciona com ou sem live.
-- Instala **apenas este plugin**, nada mais.
+
 
 ## Como instalar
 
