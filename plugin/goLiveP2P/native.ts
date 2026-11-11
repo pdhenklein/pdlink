@@ -189,6 +189,8 @@ export async function startStream(_: IpcMainInvokeEvent, o: StreamOpts) {
 
     const proc = spawn(HELPER, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     helper = proc;
+    logLine(`captura: iniciada (${o.hwnd != null ? "janela" : "tela inteira " + (o.monitor ?? 0)}, ${o.maxH}p ${o.fps} fps, som ${o.audio !== false ? "sim" : "nao"})`);
+    let errLines = 0;
     // Tela inteira com som: anota quem esta tocando som e se faz parte do Discord. Se a voz do Discord vazar na live, este arquivo
     // (audio-sessoes.json, na pasta de logs) mostra qual programa esta refazendo o som do Discord.
     if (o.audio !== false && o.hwnd == null) {
@@ -211,8 +213,12 @@ export async function startStream(_: IpcMainInvokeEvent, o: StreamOpts) {
             for (const c of clients) if (!isVideo || !c.writableNeedDrain) c.write(frame);
         }
     });
-    proc.stderr!.on("data", (d: Buffer) => { lastError = d.toString("utf8").slice(-300); lastStat = d.toString("utf8"); });
+    proc.stderr!.on("data", (d: Buffer) => {
+        lastError = d.toString("utf8").slice(-300); lastStat = d.toString("utf8");
+        if (errLines++ < 8) logLine("captura diz: " + lastStat.trim().slice(0, 300));
+    });
     proc.on("exit", code => {
+        logLine(`captura: encerrada (codigo ${code})${code ? " - " + lastError.trim().slice(-200) : ""}`);
         if (helper === proc) helper = null;
         if (code) lastError = "auxiliar saiu com codigo " + code + ". " + lastError;
     });
@@ -220,6 +226,7 @@ export async function startStream(_: IpcMainInvokeEvent, o: StreamOpts) {
 }
 
 export function stopStream(_: IpcMainInvokeEvent) {
+    if (helper) logLine("captura: pedido para parar");
     killHelper();
 }
 
@@ -273,6 +280,40 @@ app.on("before-quit", () => {
     for (const c of clients) { try { c.end(); } catch { } }
     server?.close();
 });
+
+// ---- log da sessao: UM arquivo (logs/pdlink.log), recomecado toda vez que o Discord abre. Se passar de 3 MB, recomeca
+// guardando so a metade mais nova, para nunca crescer sem limite.
+const LOG_FILE = join(PROBE_DIR, "pdlink.log");
+const LOG_MAX = 3 * 1024 * 1024;
+let logBytes = 0;
+const stamp = () => { const d = new Date(); return d.toTimeString().slice(0, 8) + "." + String(d.getMilliseconds()).padStart(3, "0"); };
+function logLine(text: string) {
+    try {
+        const fs = require("fs") as typeof import("fs");
+        const NL = String.fromCharCode(10);
+        const line = stamp() + " " + text.split(NL).join(" | ") + NL;
+        if (logBytes === 0) {
+            fs.mkdirSync(PROBE_DIR, { recursive: true });
+            const head = `pdLink ${readVersion(PKG_DIR) || "desenvolvimento"} - Discord aberto em ${new Date().toLocaleString("pt-BR")}` + NL;
+            fs.writeFileSync(LOG_FILE, head, "utf8");
+            logBytes = head.length;
+        }
+        if (logBytes > LOG_MAX) {
+            const keep = fs.readFileSync(LOG_FILE, "utf8").slice(-LOG_MAX / 2);
+            fs.writeFileSync(LOG_FILE, "(inicio do log cortado: ficou grande demais)" + NL + keep.slice(keep.indexOf(NL) + 1), "utf8");
+            logBytes = LOG_MAX / 2;
+        }
+        fs.appendFileSync(LOG_FILE, line, "utf8");
+        logBytes += line.length;
+    } catch { }
+}
+
+logLine("parte de fundo do pdLink iniciada");
+
+/** Linhas vindas da tela do Discord (ja juntadas em lotes). */
+export function log(_: IpcMainInvokeEvent, lines: string[]) {
+    if (Array.isArray(lines)) for (const l of lines.slice(0, 500)) logLine(String(l).slice(0, 2000));
+}
 
 function writeProbe(name: string, data: string) {
     try {
@@ -369,8 +410,10 @@ async function checkUpdate() {
         fs.renameSync(tmp, PENDING_DIR);
         update.ready = ver;
         update.error = "";
+        logLine(`atualizacao: ${ver} baixada, pronta para instalar`);
     } catch (e) {
         update.error = String(e);
+        logLine("atualizacao: falhou - " + String(e));
         try { failedVer = await latestVersion(); } catch { }
         failedAt = Date.now();
     } finally {

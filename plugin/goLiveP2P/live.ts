@@ -326,7 +326,20 @@ class LiveController {
         this.running = false;
         this.source = null;
         this.realFps = 0;
-        try { await Native.stopStream(); } catch { }
+        // a faixa de video continua existindo (e reusada na proxima live): apaga a ultima imagem e o som que sobrou,
+        // para que nada da tela antiga possa ser enviado depois do fim
+        this.audioQueue = [];
+        this.audioQueued = 0;
+        try {
+            this.ctx.fillStyle = "#000";
+            this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+            this.track?.requestFrame?.();
+        } catch { }
+        // a captura tem que parar de verdade: confere e tenta de novo
+        for (let i = 0; i < 3; i++) {
+            try { await Native.stopStream(); } catch { }
+            try { if (!(await Native.status()).running) break; } catch { break; }
+        }
         this.emit();
     }
 

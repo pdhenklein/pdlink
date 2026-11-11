@@ -8,6 +8,7 @@ import { PluginNative } from "@utils/types";
 
 import { getLive, getLocalToken, saveProbe, takeFlag, watchBase } from "./live";
 import { callbacks, getLiveEntry, nativeUiDiagnostics, setLiveEntry, uninstallNativeUi } from "./nativeUi";
+import { plog } from "./logger";
 import { channelHash, Hub, selfTest, userHash, WatchHandle } from "./p2p";
 
 let channelId: string | null = null;
@@ -193,6 +194,7 @@ async function watch(userId: string) {
     const self = me();
     if (!hub || !channelId || !self || handles.has(userId)) return;
     try {
+        plog(`assistir: clicou para assistir ${displayName(userId)}`);
         const hash = await userHash(channelId, userId);
         const h = await hub.watch(hash, self);
         handles.set(userId, h);
@@ -205,6 +207,7 @@ async function watch(userId: string) {
         setLiveEntry(userId, { watching: true, stream: h.stream, label: h.info.label, local: false });
     } catch (e) {
         console.warn("[pdLink] nao consegui assistir", e);
+        plog(`assistir: nao consegui assistir ${displayName(userId)} - ${String(e)}`);
         hubError = String(e);
     }
 }
@@ -236,7 +239,12 @@ function teardownChannel() {
 async function syncChannel() {
     const now = (SelectedChannelStore.getVoiceChannelId() as string | null) ?? null;
     if (now === channelId) return;
+    // saiu da call ou trocou de call: a live acaba aqui (como no Go Live do Discord). Sem isso, a captura continuava
+    // ligada e passava a transmitir para a proxima call em que a pessoa entrasse.
+    // (sem await: stop() ja marca a live como parada na hora; esperar aqui deixaria duas trocas de canal se atropelarem)
+    if (getLive().running) getLive().stop().catch(() => { });
     teardownChannel();
+    plog(now ? "call: entrou numa call" : "call: saiu da call");
     channelId = now;
     lastRunning = false;
     if (!channelId) return;
@@ -265,6 +273,7 @@ async function syncChannel() {
     } catch (e) {
         hubError = String(e);
         console.warn("[pdLink] ponto de encontro indisponivel", e);
+        plog("ponto de encontro: nenhum respondeu - " + String(e));
     }
 }
 
@@ -284,6 +293,7 @@ function syncLive() {
     if (live.running) {
         buildWatchUrl().then(u => { watchUrl = u; saveProbe("watch-url.txt", u); }).catch(() => { });
         setLiveEntry(self, { local: true, watching: true, label });
+        plog(`live: comecou ("${label}", ${live.prefs.maxH}p ${live.prefs.fps} fps)`);
         hub.startBroadcast(
             () => ({ label: live.source?.label ?? "Live", fps: live.prefs.fps, maxH: live.prefs.maxH }),
             () => live.getVideoTrack(),
@@ -298,6 +308,7 @@ function syncLive() {
             }
         );
     } else {
+        plog("live: terminou");
         hub.stopBroadcast();
         watchUrl = "";
         if (getLiveEntry(self)) setLiveEntry(self, null);
@@ -330,6 +341,8 @@ function syncLive() {
 export function startManager() {
     if (started) return;
     started = true;
+    // uma captura que sobrou de antes (ex.: a tela do Discord recarregou no meio de uma live) e encerrada ao iniciar
+    getLive().stop().catch(() => { });
     getLocalToken().then(t => { localToken = t; }).catch(() => { });
     callbacks.watch = userId => { watch(userId); };
     callbacks.unwatch = userId => unwatch(userId);
@@ -356,6 +369,7 @@ export function stopManager() {
     if (!started) return;
     started = false;
     unsubLive?.();
+    if (getLive().running) getLive().stop().catch(() => { });
     (SelectedChannelStore as any).removeChangeListener(channelListener);
     teardownChannel();
     channelId = null;

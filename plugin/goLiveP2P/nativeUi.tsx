@@ -2,6 +2,7 @@ import { findByProps, findStore } from "@webpack";
 import { ChannelStore, FluxDispatcher, SelectedChannelStore, UserStore, useEffect, useRef } from "@webpack/common";
 
 import { pickSink } from "./audioSink";
+import { plog } from "./logger";
 import { getLive } from "./live";
 import { MarkLayer } from "./marks";
 
@@ -221,7 +222,14 @@ function P2PVideo(props: any) {
         }
         v.play().catch(() => { });
         const size = () => { if (v.videoWidth) onResize?.({ width: v.videoWidth, height: v.videoHeight }); };
-        const ready = () => { size(); onReady?.(); };
+        const shown = performance.now();
+        let told = false;
+        const ready = () => {
+            size();
+            onReady?.();
+            if (!told && !local) { told = true; plog(`assistir: imagem apareceu na tela (${v.videoWidth}x${v.videoHeight}, ${Math.round(performance.now() - shown)} ms depois de abrir o quadro)`); }
+        };
+        if (!local) plog("assistir: quadro da live aberto, esperando imagem");
         v.addEventListener("loadedmetadata", size);
         v.addEventListener("resize", size);
         v.addEventListener("playing", ready);

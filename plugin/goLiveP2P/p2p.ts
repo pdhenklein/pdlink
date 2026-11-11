@@ -1,6 +1,7 @@
 import { FrameReceiver, HwDecoder, HwEncoder, LatestFramePainter, sendFrame } from "./hwvideo";
 import { FileEngine, FileOffer, sanitizeOffer } from "./fileXfer";
 import { Mark, sanitizeMark } from "./marksCore";
+import { plog, since } from "./logger";
 import { MqttClient } from "./mqtt";
 
 // Brokers MQTT publicos, usados so para sinalizacao (textos de conexao e "quem esta ao vivo").
@@ -146,6 +147,9 @@ interface BroadcastConn {
     pc: RTCPeerConnection;
     from: string;
     userId?: string;
+    cands: RTCIceCandidateInit[]; // meus candidatos, repetidos junto com a resposta (o ponto de encontro perde mensagens)
+    answer?: any; // resposta ja enviada: se o espectador pedir de novo, vai a mesma
+    t0: number;
 }
 
 /** Ponto de encontro de um canal de voz: presenca ("quem esta ao vivo") + caixa de mensagens privada. */
@@ -219,7 +223,8 @@ export class Hub {
                 await m.connect(url, "glp" + rand(), { topic: this.presenceTopic, payload: "", retain: true });
                 this.mqtt = m;
                 this.brokerUsed = url;
-                m.onClose = () => { if (this.mqtt === m && !this.stopped) this.scheduleReconnect(); };
+                plog(`ponto de encontro: conectado (${url.replace(/^wss?:\/\//, "").split("/")[0]})`);
+                m.onClose = () => { if (this.mqtt === m && !this.stopped) { plog("ponto de encontro: conexao caiu, reconectando"); this.scheduleReconnect(); } };
                 m.subscribe(`glp/v1/${this.ch}/live/+`, (t, p) => this.onPresenceMsg(t, p));
                 m.subscribe(this.inboxTopic, (_t, p) => this.onInbox(p));
                 m.subscribe(`glp/v1/${this.ch}/mod/+`, (t, p) => this.onModMsg(t, p));
@@ -230,6 +235,7 @@ export class Hub {
                 return;
             } catch (e) {
                 lastErr = e;
+                plog(`ponto de encontro: ${url.replace(/^wss?:\/\//, "").split("/")[0]} nao respondeu (${String(e).slice(0, 120)})`);
                 m.close();
             }
         }
@@ -497,8 +503,16 @@ export class Hub {
     }
 
     private async acceptOffer(m: any) {
+        const again = this.conns.get(m.connectionId);
+        if (again) {
+            // pedido repetido (a resposta ou candidatos podem ter se perdido): reaproveita a conexao, nada e renegociado
+            if (again.pc.remoteDescription) for (const c of Array.isArray(m.cands) ? m.cands : []) again.pc.addIceCandidate(c).catch(() => { });
+            if (again.answer) this.send(again.from, { ...again.answer, cands: again.cands });
+            return;
+        }
         if (!this.getTrack || !this.getInfo || this.conns.size >= MAX_VIEWERS) return;
         if (!this.isAllowedViewer(m)) {
+            plog(`live: pedido recusado (${m.userId ? this.nameOf(m.userId) || "alguem" : "sem usuario"} nao esta na chamada)`);
             // quem nao esta na sua chamada nao recebe nada alem da recusa
             this.deniedCount++;
             this.send(m.from, { type: "ANSWER", connectionId: m.connectionId, denied: true });
@@ -506,11 +520,18 @@ export class Hub {
         }
         const id: string = m.connectionId;
         const pc = new RTCPeerConnection(ICE);
-        this.conns.set(id, { pc, from: m.from, userId: m.userId });
+        const who = m.userId ? this.nameOf(m.userId) || "espectador" : "pagina local";
+        const conn: BroadcastConn = { pc, from: m.from, userId: m.userId, cands: [], t0: performance.now() };
+        this.conns.set(id, conn);
+        plog(`live: ${who} pediu para assistir (${id})`);
         pc.onicecandidate = ev => {
-            if (ev.candidate) this.send(m.from, { type: "CANDIDATE", connectionId: id, candidate: ev.candidate.toJSON() });
+            if (!ev.candidate) return;
+            const c = ev.candidate.toJSON();
+            conn.cands.push(c);
+            this.send(m.from, { type: "CANDIDATE", connectionId: id, candidate: c });
         };
         pc.onconnectionstatechange = () => {
+            plog(`live: conexao com ${who} -> ${pc.connectionState} (${since(conn.t0)})`);
             if (["failed", "closed", "disconnected"].includes(pc.connectionState)) this.dropViewer(id);
             else this.onViewers(this.viewers());
         };
@@ -520,6 +541,7 @@ export class Hub {
             else if (useHw) this.onDataChannel(ev.channel);
         };
         await pc.setRemoteDescription({ type: "offer", sdp: useHw ? m.sdp : boostSdp(reorderVideoCodecs(m.sdp), this.getInfo()) });
+        for (const c of Array.isArray(m.cands) ? m.cands : []) pc.addIceCandidate(c).catch(() => { });
         const track = this.getTrack();
         const neg: any = { offer: (m.sdp.split("\r\n").find((l: string) => l.startsWith("m=video")) ?? "").slice(0, 120) };
         const tr = pc.getTransceivers().find(t => t.receiver.track.kind === "video");
@@ -548,7 +570,17 @@ export class Hub {
         })();
         this.negotiations.set(id, neg);
         await this.applyQuality(pc);
-        this.send(m.from, { type: "ANSWER", connectionId: id, sdp: answer.sdp, info: { ...this.getInfo(), mode: useHw ? "dc" : "rtp" } });
+        // a live pode ter acabado durante a negociacao: ninguem recebe resposta de uma live encerrada
+        if (!this.getTrack || !this.getInfo || this.conns.get(id)?.pc !== pc) {
+            try { pc.close(); } catch { }
+            this.conns.delete(id);
+            return;
+        }
+        conn.answer = { type: "ANSWER", connectionId: id, sdp: answer.sdp, info: { ...this.getInfo(), mode: useHw ? "dc" : "rtp" } };
+        this.send(m.from, { ...conn.answer, cands: conn.cands });
+        // a resposta vai duas vezes (a segunda ja leva os candidatos que surgiram nesse meio tempo)
+        setTimeout(() => { if (this.conns.get(id) === conn) this.send(m.from, { ...conn.answer, cands: conn.cands }); }, 500);
+        plog(`live: resposta enviada para ${who} (modo ${useHw ? "placa de video" : "rtp"}, ${since(conn.t0)})`);
     }
 
     async applyQuality(only?: RTCPeerConnection) {
@@ -608,6 +640,7 @@ export class Hub {
     private dropViewer(id: string) {
         const c = this.conns.get(id);
         if (!c) return;
+        plog(`live: espectador ${c.userId ? this.nameOf(c.userId) || "?" : "local"} saiu (${id})`);
         try { c.pc.close(); } catch { }
         this.conns.delete(id);
         this.onViewers(this.viewers());
@@ -656,29 +689,64 @@ export class Hub {
             if (ev.track.kind === "video" && mode === "dc") return;
             stream.addTrack(ev.track);
         };
+        const t0 = performance.now();
+        const cands: RTCIceCandidateInit[] = [];
         pc.onicecandidate = ev => {
-            if (ev.candidate) this.send(target.inbox, { type: "CANDIDATE", connectionId: id, candidate: ev.candidate.toJSON() });
+            if (!ev.candidate) return;
+            const c = ev.candidate.toJSON();
+            cands.push(c);
+            this.send(target.inbox, { type: "CANDIDATE", connectionId: id, candidate: c });
         };
+        pc.oniceconnectionstatechange = () => plog(`assistir: rede -> ${pc.iceConnectionState} (${since(t0)})`);
         const entry: { pc: RTCPeerConnection; resolve?: (m: any) => void; } = { pc };
         this.viewing.set(id, entry);
+        plog(`assistir: pedindo para assistir "${target.label ?? "live"}" (${id})`);
 
+        // O ponto de encontro (servidor MQTT publico) as vezes perde mensagens. Entao o pedido e repetido a cada 1 s,
+        // levando junto todos os meus candidatos, ate a conexao abrir; o transmissor responde de novo com os dele.
+        let offerMsg: any = null;
+        let tries = 0;
+        const resend = setInterval(() => {
+            if (!offerMsg || pc.connectionState === "connected" || pc.signalingState === "closed") return;
+            tries++;
+            this.send(target.inbox, { ...offerMsg, cands });
+        }, 1000);
+        const stopResend = () => clearInterval(resend);
+        pc.addEventListener("connectionstatechange", () => {
+            if (pc.connectionState === "connected") { stopResend(); plog(`assistir: conectado (${since(t0)}, pedido repetido ${tries}x)`); }
+            if (pc.connectionState === "failed" || pc.connectionState === "closed") stopResend();
+        });
+
+        let answered = false;
         const info = await new Promise<LiveInfo>((resolve, reject) => {
-            const timer = setTimeout(() => { this.viewing.delete(id); try { pc.close(); } catch { } reject(new Error("a live nao respondeu")); }, timeoutMs);
+            const fail = (why: string) => { stopResend(); this.viewing.delete(id); try { pc.close(); } catch { } plog(`assistir: falhou - ${why} (${since(t0)}, pedido repetido ${tries}x)`); reject(new Error(why)); };
+            const timer = setTimeout(() => fail("a live nao respondeu"), timeoutMs);
             entry.resolve = async (m: any) => {
+                if (answered) {
+                    // resposta repetida: so traz candidatos que podem ter se perdido
+                    for (const c of Array.isArray(m.cands) ? m.cands : []) pc.addIceCandidate(c).catch(() => { });
+                    return;
+                }
+                answered = true;
                 clearTimeout(timer);
-                if (m.denied) { this.viewing.delete(id); try { pc.close(); } catch { } reject(new Error("so quem esta na mesma chamada pode assistir")); return; }
+                if (m.denied) { fail("so quem esta na mesma chamada pode assistir"); return; }
                 mode = m.info?.mode ?? "rtp";
                 if (mode === "dc" && dc) {
                     vtrack = vcanvas.captureStream(0).getVideoTracks()[0] as any;
                     stream.addTrack(vtrack!);
                 } else mode = "rtp";
+                plog(`assistir: resposta recebida (modo ${mode}, ${since(t0)}, pedido repetido ${tries}x)`);
                 await pc.setRemoteDescription({ type: "answer", sdp: m.sdp });
+                for (const c of Array.isArray(m.cands) ? m.cands : []) pc.addIceCandidate(c).catch(() => { });
+                // se a conexao nao abrir em 15 s depois da resposta, para de insistir e deixa registrado
+                setTimeout(() => { if (pc.connectionState !== "connected" && pc.signalingState !== "closed") { plog(`assistir: conexao nao abriu (${pc.connectionState}, ${since(t0)})`); stopResend(); } }, 15000);
                 resolve(m.info as LiveInfo);
             };
             pc.createOffer().then(async offer => {
                 await pc.setLocalDescription(offer);
-                this.send(target.inbox, { type: "OFFER", connectionId: id, sdp: offer.sdp, userId: myDiscordId, hw: hwOk });
-            }).catch(e => { clearTimeout(timer); reject(e); });
+                offerMsg = { type: "OFFER", connectionId: id, sdp: offer.sdp, userId: myDiscordId, hw: hwOk };
+                this.send(target.inbox, { ...offerMsg, cands });
+            }).catch(e => { clearTimeout(timer); fail(String(e)); });
         });
 
         const handle: WatchHandle = {
@@ -687,6 +755,8 @@ export class Hub {
             stream, info, mode,
             stats: () => ({ mode, decoded: dec.decoded, painted: painter.painted, hardwareDecode: dec.hardware, erro: dec.error, bytes: recv.bytes }),
             close: () => {
+                stopResend();
+                plog(`assistir: saiu da live (${id})`);
                 this.send(target.inbox, { type: "LEAVE", connectionId: id });
                 this.viewing.delete(id);
                 painter.stop();
