@@ -3,6 +3,7 @@ import { ChannelStore, GuildMemberStore, RelationshipStore, SelectedChannelStore
 import { createMarkSession, dropMarkSession, notifyMarkSessions, registerMarkSession } from "./marks";
 import { type Mark } from "./marksCore";
 import { bindFiles, handleOffer, type Peer, setPeers } from "./files";
+import { setListeners, startMusic, stopMusic } from "./music";
 import { pickFullName, pickName } from "./names";
 import { PluginNative } from "@utils/types";
 
@@ -65,7 +66,11 @@ async function refreshPeers() {
         const at = h.mods.get(await hashOf(id));
         if (at && Date.now() - at < 70000) list.push({ id, name: fullName(id) });
     }
-    if (hub === h) setPeers(list);
+    if (hub === h) {
+        setPeers(list);
+        const self = me();
+        setListeners(self ? [{ id: self, name: fullName(self) }, ...list] : list);
+    }
 }
 
 // nome da pessoa NAQUELA chamada (apelido do servidor, do grupo ou de amigo), so a primeira palavra
@@ -222,6 +227,7 @@ function unwatch(userId: string) {
 
 function teardownChannel() {
     bindFiles(null);
+    stopMusic();
     hashCache.clear();
     overlayKey = "";
     lastMarksAllowed = null;
@@ -257,6 +263,7 @@ async function syncChannel() {
     h.nameOf = displayName;
     // arquivos: so aceito oferta de quem esta na chamada agora
     bindFiles({ hub: h, myId: self, nameOf: fullName });
+    startMusic(h, self, displayName).then(() => { if (hub === h) refreshPeers(); else stopMusic(); }).catch(() => { });
     h.onFileOffer = (from, offer) => { if (others().includes(from)) handleOffer(from, fullName(from), offer); };
     h.onMods = () => { refreshPeers(); };
     h.onMark = (_uid, m: Mark) => nativeCall("overlayMark", JSON.stringify(m));

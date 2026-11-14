@@ -202,6 +202,9 @@ export class Hub {
     private modTopic = "";
     private filesTopic = "";
     private modTimer: any = null;
+    private musicTopic = "";
+    /** Musica: estado da fila que chegou da chamada. */
+    onMusic: (text: string) => void = () => { };
 
     constructor(private channelId: string, private myUserId: string) { }
 
@@ -212,6 +215,7 @@ export class Hub {
         this.inboxTopic = `glp/v1/${this.ch}/in/${rand()}`;
         this.modTopic = `glp/v1/${this.ch}/mod/${mine}`;
         this.filesTopic = `glp/v1/${this.ch}/fx/${mine}`;
+        this.musicTopic = `glp/v1/${this.ch}/mu`;
         await this.open();
     }
 
@@ -229,6 +233,7 @@ export class Hub {
                 m.subscribe(this.inboxTopic, (_t, p) => this.onInbox(p));
                 m.subscribe(`glp/v1/${this.ch}/mod/+`, (t, p) => this.onModMsg(t, p));
                 m.subscribe(this.filesTopic, (_t, p) => this.onFilesTopic(p));
+                m.subscribe(this.musicTopic, (_t, p) => { if (p) this.onMusic(p); });
                 this.announceMod();
                 if (!this.modTimer) this.modTimer = setInterval(() => this.announceMod(), 20000);
                 if (this.announced) this.announce(this.announced);
@@ -284,6 +289,11 @@ export class Hub {
             this.mods.set(hash, at);
             if (!had) this.onMods();
         } catch { }
+    }
+
+    /** Musica: publica o estado da fila para a chamada (`keep` = fica guardado para quem entrar depois). */
+    publishMusic(text: string, keep: boolean) {
+        this.mqtt?.publish(this.musicTopic, text, keep);
     }
 
     /** Oferece um arquivo (ja registrado em `files`) a esses usuarios; so eles recebem o aviso. */

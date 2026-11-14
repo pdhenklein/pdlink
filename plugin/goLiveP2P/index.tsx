@@ -5,6 +5,7 @@ import definePlugin, { PluginNative } from "@utils/types";
 import { ContextMenuApi, Menu, ScrollerThin, SelectedChannelStore, useEffect, useRef, useState } from "@webpack/common";
 
 import { FilesButton } from "./files";
+import { MusicButton } from "./music";
 import { showUpdateBanner } from "./updateBanner";
 import { getWatchUrl, startManager, stopManager } from "./manager";
 import { Settings } from "@api/Settings";
@@ -519,7 +520,7 @@ export default definePlugin({
     },
 
     renderFilesButton() {
-        return <FilesButton />;
+        return <><MusicButton /><FilesButton /></>;
     },
 
     start() {

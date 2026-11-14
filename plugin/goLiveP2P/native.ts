@@ -1,6 +1,6 @@
 import { randomBytes } from "crypto";
 import { execFile, spawn } from "child_process";
-import { ConnectSrc, CspPolicies } from "@main/csp";
+import { ConnectSrc, CspPolicies, ImageSrc } from "@main/csp";
 import { app, IpcMainInvokeEvent } from "electron";
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "fs";
 import { createServer, Server, ServerResponse } from "http";
@@ -8,12 +8,17 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import { closeAll, closeFile, openFile, reveal, saveDialog, writeFile } from "./fileNative";
+import { musicClean, musicClock as mClock, musicFetch as mFetch, musicInit, musicSearch as mSearch } from "./musicNative";
 import { overlayInfo, sendOverlay, showToast, startOverlay, stopOverlay } from "./overlay";
 import { discordUpdateExe, relaunchAfterExit } from "./updateRestart";
 
 // Brokers MQTT publicos usados so para sinalizacao (textos de conexao e quem esta ao vivo); o video nunca passa por la
 CspPolicies["wss://broker.emqx.io:8084"] = ConnectSrc;
 CspPolicies["wss://broker.hivemq.com:8884"] = ConnectSrc;
+// capas das musicas
+CspPolicies["i.ytimg.com"] = ImageSrc;
+CspPolicies["*.sndcdn.com"] = ImageSrc;
+CspPolicies["*.suno.ai"] = ImageSrc;
 
 // Instalado (pacote): o auxiliar e a pagina de assistir ficam ao lado deste arquivo (patcher.js).
 // Desenvolvimento: usa as pastas do projeto.
@@ -309,6 +314,13 @@ function logLine(text: string) {
 }
 
 logLine("parte de fundo do pdLink iniciada");
+
+// ---- musica
+musicInit(PACKAGED ? join(PKG_DIR, "..", "music") : "F:/Discord2/probe/music", t => logLine(t));
+setTimeout(musicClean, 30000);
+export function musicSearch(_: IpcMainInvokeEvent, query: string) { return mSearch(query); }
+export function musicFetch(_: IpcMainInvokeEvent, ref: string) { return mFetch(String(ref)); }
+export function musicClock(_: IpcMainInvokeEvent) { return mClock(); }
 
 /** Linhas vindas da tela do Discord (ja juntadas em lotes). */
 export function log(_: IpcMainInvokeEvent, lines: string[]) {
