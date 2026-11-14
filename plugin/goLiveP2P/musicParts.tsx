@@ -36,7 +36,13 @@ const CSS = [
     ".pdl-b:active{transform:scale(.88)!important}",
     ".pdl-win ::-webkit-scrollbar{width:6px}",
     ".pdl-win ::-webkit-scrollbar-thumb{background:#3f4147;border-radius:3px}",
-    ".pdl-win ::-webkit-scrollbar-track{background:transparent}"
+    ".pdl-win ::-webkit-scrollbar-track{background:transparent}",
+    "@keyframes pdl-dot{0%,80%,100%{opacity:.25;transform:scale(.8)}40%{opacity:1;transform:scale(1)}}",
+    "@keyframes pdl-bg{from{opacity:0}to{opacity:1}}",
+    ".pdl-ly{transition:color .45s ease,opacity .45s ease;cursor:pointer}",
+    ".pdl-ly:hover{color:rgba(255,255,255,.88)!important;opacity:1!important}",
+    ".pdl-lyb{animation:pdl-bg .6s ease-out}",
+    ".pdl-lys::-webkit-scrollbar{width:0!important}"
 ].join("");
 export function ensureCss(doc: Document) {
     if (doc.getElementById("pdl-music-css")) return;
@@ -65,10 +71,13 @@ const PATHS: Record<string, string> = {
     seta: "M19 12H5M12 19l-7-7 7-7",
     girando: "M21 12a9 9 0 1 1-6.2-8.6",
     pc: "M4 5h16v11H4zM8 20h8M12 16v4",
-    pasta: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"
+    pasta: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+    microfone: "M11.68 6.86A4.6 4.6 0 1 1 17.05 12.22ZM10.9 7.91 15.99 13 9.06 18.94A2.9 2.9 0 0 1 4.96 14.84Z"
 };
+/** icones desenhados so com preenchimento (sem contorno) */
+const SOLID = new Set(["microfone"]);
 export const Icon = ({ n, size = 18, fill, spin }: { n: string; size?: number; fill?: boolean; spin?: boolean; }) => (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill={fill ? "currentColor" : "none"} stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", display: "block", animation: spin ? "pdl-spin .8s linear infinite" : undefined }}><path d={PATHS[n]} /></svg>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill={fill || SOLID.has(n) ? "currentColor" : "none"} stroke={SOLID.has(n) ? "none" : "currentColor"} strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", display: "block", animation: spin ? "pdl-spin .8s linear infinite" : undefined }}><path d={PATHS[n]} /></svg>
 );
 const PlayIcon = ({ playing, size = 16 }: { playing: boolean; size?: number; }) => (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" style={{ display: "block" }}><path d={playing ? "M6 4h4v16H6zM14 4h4v16h-4z" : "M7 3l14 9-14 9V3z"} /></svg>

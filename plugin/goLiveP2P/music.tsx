@@ -8,7 +8,7 @@ import { React, ReactDOM, useEffect, useRef, useState } from "@webpack/common";
 import { currentTrack, Track } from "./musicCore";
 import type { Found } from "./musicNative";
 import { Avatars, col, Controls, Cover, EASE, ellipsis, ensureCss, fmt, Grip, Heart, Icon, IconBtn, SeekBar, Volume, Wave } from "./musicParts";
-import { addLocalFiles, Bound, emit, isLocal, plain, removeLocal, runSearch, S, sameLocal, saveLists, setView, subs, toTrack, View } from "./musicState";
+import { addLocalFiles, Bound, emit, isLocal, lyricsFor, plain, removeLocal, runSearch, S, sameLocal, saveLists, setView, subs, toggleLyrics, toTrack, View } from "./musicState";
 
 export { setListeners, startMusic, stopMusic } from "./musicState";
 
@@ -285,9 +285,16 @@ function Body({ b, compact, close }: { b: Bound; compact: boolean; close: () => 
                     </div>
                     <div style={{ marginTop: 4 }}><SeekBar b={b} /></div>
                 </div>
-                <div style={{ padding: "8px 10px 4px", display: "flex" }}><SearchBox b={b} compact /></div>
-                <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "0 10px 4px" }}>{tabs}<div style={{ flex: 1 }} /><Volume width={70} /></div>
-                <div style={{ ...scroll, padding: "0 6px 6px" }}>{shown}</div>
+                {S.lyrics
+                    ? <>
+                        <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "8px 10px 6px" }}><div style={{ flex: 1 }} /><LyricsBtn size={26} /><Volume width={70} /></div>
+                        <div style={{ flex: 1, minHeight: 0, display: "flex", padding: "0 10px 10px" }}><LyricsView b={b} compact /></div>
+                    </>
+                    : <>
+                        <div style={{ padding: "8px 10px 4px", display: "flex" }}><SearchBox b={b} compact /></div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "0 10px 4px" }}>{tabs}<div style={{ flex: 1 }} /><LyricsBtn size={26} /><Volume width={70} /></div>
+                        <div style={{ ...scroll, padding: "0 6px 6px" }}>{shown}</div>
+                    </>}
             </>
         );
     }
@@ -298,18 +305,110 @@ function Body({ b, compact, close }: { b: Bound; compact: boolean; close: () => 
                 <Avatars />
                 <IconBtn size={26} title="Fechar a janela (a musica continua)" onClick={close}><Icon n="x" size={15} /></IconBtn>
             </div>
-            <div style={{ display: "flex", gap: 10, padding: "0 12px", flex: 1, minHeight: 0 }}>
+            {S.lyrics ? <div style={{ display: "flex", padding: "0 12px", flex: 1, minHeight: 0 }}><LyricsView b={b} compact={false} /></div> : <div style={{ display: "flex", gap: 10, padding: "0 12px", flex: 1, minHeight: 0 }}>
                 <div style={{ width: 124, flex: "none", background: col.card, borderRadius: 8, padding: 6, display: "flex", flexDirection: "column", gap: 2 }}>{tabs}</div>
                 <div style={{ flex: 1, minWidth: 0, background: col.card, borderRadius: 8, padding: 6, display: "flex", flexDirection: "column" }}>
                     <div style={scroll}>{shown}</div>
                 </div>
-            </div>
+            </div>}
             <div style={{ margin: 12, marginTop: 10, background: col.card, borderRadius: 8, padding: "10px 12px", display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1.5fr) minmax(0,1fr)", gap: 12, alignItems: "center" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}><Cover img={t?.img ?? ""} size={40} busy={loading(b)} /><NowLine b={b} />{t && <Heart f={t} size={28} />}</div>
                 <div><Controls b={b} /><SeekBar b={b} /></div>
-                <div style={{ display: "flex", justifyContent: "flex-end" }}><Volume width={90} /></div>
+                <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 4 }}><LyricsBtn /><Volume width={90} /></div>
             </div>
         </>
+    );
+}
+
+/** Botao de microfone: abre e fecha a letra (so para mim). */
+const LyricsBtn = ({ size }: { size?: number; }) => (
+    <IconBtn size={size} title={S.lyrics ? "Fechar a letra" : "Ver a letra"} active={S.lyrics} onClick={toggleLyrics}><Icon n="microfone" size={18} /></IconBtn>
+);
+
+const Dots = () => (
+    <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+        {[0, 1, 2].map(i => <span key={i} style={{ width: 8, height: 8, borderRadius: 4, background: "#fff", animation: `pdl-dot 1.2s ${i * 0.16}s infinite ease-in-out` }} />)}
+    </div>
+);
+
+const fade = "linear-gradient(transparent, #000 12%, #000 86%, transparent)";
+
+/** Letra no estilo karaoke: a linha da vez acende inteira, a tela rola sozinha e clicar numa linha leva a musica para ela (para todos). */
+function LyricsView({ b, compact }: { b: Bound; compact: boolean; }) {
+    const t = currentTrack(b.sync.state);
+    const L = t ? lyricsFor(t) : null;
+    const lines = L && !L.busy && L.ok ? L.synced : null;
+    const box = useRef<HTMLDivElement>(null);
+    const userAt = useRef(0);
+    const [now, setNow] = useState(-1);
+
+    useEffect(() => {
+        if (!lines?.length) { setNow(-1); return; }
+        const tick = () => {
+            // um pouco adiantado: a linha acende quando a voz comeca, nao depois
+            const p = b.sync.position() + 0.2;
+            let i = -1;
+            for (let k = 0; k < lines.length && lines[k].t <= p; k++) i = k;
+            setNow(i);
+        };
+        tick();
+        const id = setInterval(tick, 100);
+        return () => clearInterval(id);
+    }, [lines, b]);
+
+    useEffect(() => {
+        const el = box.current;
+        // se a pessoa rolou com o mouse, espero um pouco antes de voltar para a linha da vez
+        if (!el || Date.now() - userAt.current < 3500) return;
+        const line = now >= 0 ? el.querySelector<HTMLElement>(`[data-i="${now}"]`) : null;
+        el.scrollTo({ top: line ? line.offsetTop - el.clientHeight * 0.34 : 0, behavior: "smooth" });
+    }, [now, lines]);
+
+    const big = compact ? 19 : 30;
+    const pad = compact ? "0 16px" : "0 36px";
+    const center = (icon: React.ReactNode, text: string) => (
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 12, color: "rgba(255,255,255,.8)", fontSize: 14, fontWeight: 600, textAlign: "center", padding: 20 }}>{icon}{text}</div>
+    );
+
+    let content: React.ReactNode;
+    if (!t) content = center(<Icon n="microfone" size={28} />, "Coloque uma musica para ver a letra");
+    else if (!L || L.busy) content = center(<Dots />, "Procurando a letra...");
+    else if (!L.ok) content = center(<Icon n="microfone" size={28} />, L.error.charAt(0).toUpperCase() + L.error.slice(1));
+    else if (lines?.length) {
+        content = (
+            <div
+                ref={box} className="pdl-lys"
+                onWheel={() => { userAt.current = Date.now(); }}
+                style={{ position: "relative", flex: 1, minHeight: 0, overflowY: "auto", padding: pad, maskImage: fade, WebkitMaskImage: fade }}
+            >
+                <div style={{ height: "34%" }} />
+                {lines.map((l, i) => (
+                    <div
+                        key={i} data-i={i} className="pdl-ly"
+                        onClick={() => { userAt.current = 0; b.sync.do({ t: "seek", pos: l.t }); }}
+                        style={{ fontSize: big, fontWeight: 800, lineHeight: 1.22, letterSpacing: "-.02em", padding: compact ? "6px 0" : "10px 0", color: i === now ? "#fff" : "rgba(255,255,255,.62)", opacity: i < now ? 0.55 : 1 }}
+                    >{l.text || "♪"}</div>
+                ))}
+                <div style={{ height: "55%" }} />
+            </div>
+        );
+    } else if (L.plain) {
+        content = (
+            <div className="pdl-lys" style={{ position: "relative", flex: 1, minHeight: 0, overflowY: "auto", padding: pad }}>
+                <div style={{ color: "rgba(255,255,255,.6)", fontSize: 12, fontWeight: 600, margin: "16px 0 8px" }}>Essa letra nao tem o tempo de cada linha, entao ela nao acompanha a musica</div>
+                <div style={{ color: "#fff", fontSize: compact ? 15 : 20, fontWeight: 700, lineHeight: 1.6, whiteSpace: "pre-wrap", paddingBottom: 24 }}>{L.plain}</div>
+            </div>
+        );
+    } else content = center(<Icon n="fone" size={28} />, "Musica instrumental");
+
+    return (
+        <div className="pdl-view" style={{ position: "relative", flex: 1, minHeight: 0, borderRadius: 8, overflow: "hidden", background: "#1d2b3a", display: "flex", flexDirection: "column" }}>
+            {/* fundo: a propria capa, bem desfocada, da a cor da tela */}
+            {t?.img && <img key={t.img} src={t.img} className="pdl-lyb" alt="" style={{ position: "absolute", left: "-20%", top: "-20%", width: "140%", height: "140%", objectFit: "cover", filter: "blur(60px) saturate(1.6) brightness(.7)", pointerEvents: "none" }} />}
+            <div style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,.28)", pointerEvents: "none" }} />
+            <div key={t?.id ?? ""} className="pdl-view" style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>{content}</div>
+            {L && !L.busy && L.ok && <div style={{ position: "absolute", right: 10, bottom: 6, fontSize: 10, color: "rgba(255,255,255,.45)", pointerEvents: "none" }}>Letra: LRCLIB</div>}
+        </div>
     );
 }
 

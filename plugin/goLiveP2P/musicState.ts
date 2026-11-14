@@ -8,7 +8,7 @@ import { PluginNative } from "@utils/types";
 import { plog } from "./logger";
 import { currentTrack, MusicSync, Track } from "./musicCore";
 import { MusicClient, MusicServer } from "./musicLink";
-import type { Found } from "./musicNative";
+import type { Found, Lyrics } from "./musicNative";
 import { MusicPlayer } from "./musicPlayer";
 import { type Hub, ICE } from "./p2p";
 
@@ -37,8 +37,33 @@ export const S = {
     localError: "",
     view: "fila" as View,
     search: { busy: false, error: "", items: [], query: "" } as SearchState,
-    openList: -1
+    openList: -1,
+    /** tela de letra aberta (so para mim) */
+    lyrics: false
 };
+
+export const toggleLyrics = () => { S.lyrics = !S.lyrics; emit(); };
+
+// ------------------------------------------------------------------ letra: cada um busca a sua; o tempo e o mesmo da musica
+
+export type LyricsState = { busy: true; } | ({ busy: false; } & Lyrics);
+const lyricsCache = new Map<string, LyricsState>();
+const lyricsKey = (t: { title: string; artist: string; dur: number; }) => t.title + "|" + t.artist + "|" + Math.round(t.dur);
+
+export function lyricsFor(t: { title: string; artist: string; dur: number; src: string; }): LyricsState {
+    const key = lyricsKey(t);
+    const have = lyricsCache.get(key);
+    if (have) return have;
+    if (typeof (Native as any)?.musicLyrics !== "function") return { busy: false, ok: false, error: "feche e abra o Discord para ativar a letra" };
+    lyricsCache.set(key, { busy: true });
+    // musica do PC: o nome do arquivo e o titulo; o artista do Suno nao ajuda na busca
+    const artist = t.src === "local" || t.src === "suno" ? "" : t.artist;
+    Native.musicLyrics(t.title, artist, t.dur)
+        .then(r => lyricsCache.set(key, { busy: false, ...r }))
+        .catch(() => lyricsCache.set(key, { busy: false, ok: false, error: "nao consegui buscar a letra agora" }))
+        .finally(() => { if (lyricsCache.size > 100) lyricsCache.delete(lyricsCache.keys().next().value!); emit(); });
+    return { busy: true };
+}
 
 let clockOffset = 0;
 let clockAt = 0;

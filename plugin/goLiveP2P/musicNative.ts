@@ -256,3 +256,82 @@ export async function musicClock(): Promise<{ ok: boolean; offset: number; }> {
     note("musica: nao consegui medir a hora certa; usando o relogio do PC");
     return { ok: false, offset: 0 };
 }
+
+// ------------------------------------------------------------------ letra (LRCLIB: banco aberto de letras com o tempo de cada linha)
+
+export interface LyricLine { t: number; text: string; }
+export type Lyrics = { ok: true; synced: LyricLine[] | null; plain: string | null; instrumental: boolean; } | { ok: false; error: string; };
+
+const lyricCache = new Map<string, Lyrics>();
+const JUNK = /\b(official|oficial|video|v[ií]deo|audio|[aá]udio|lyrics?|letra|clipe|visuali[sz]er|hd|4k|mv|remaster(ed)?|legendado|tradu[cç][aã]o)\b/i;
+
+/** "Artista - Musica (Official Video) [4K]" vira { artist: "Artista", track: "Musica" } */
+export function cleanTitle(title: string, artist: string) {
+    let t = String(title ?? "").replace(/\.(mp3|m4a|aac|wav|flac|ogg|opus|webm)$/i, "");
+    t = t.replace(/[([{]([^)\]}]*)[)\]}]/g, (m, inner: string) => (JUNK.test(inner) ? " " : m));
+    t = t.replace(/\s(ft\.?|feat\.?|featuring)\s.*$/i, "").split(/\s[|/]\s/)[0];
+    let a = String(artist ?? "").replace(/\s*-\s*topic$/i, "").replace(/vevo$/i, "").trim();
+    const dash = t.split(/\s[-–]\s/);
+    if (dash.length >= 2) { a = dash[0].trim(); t = dash.slice(1).join(" - "); }
+    t = t.replace(/[([{][^)\]}]*[)\]}]/g, " ").replace(/["']/g, "").replace(/\s+/g, " ").trim();
+    return { track: t.slice(0, 150), artist: a.slice(0, 100) };
+}
+
+export function parseLrc(text: string): LyricLine[] {
+    const out: LyricLine[] = [];
+    for (const raw of String(text).split(/\r?\n/).slice(0, 2000)) {
+        const stamps = [...raw.matchAll(/\[(\d{1,3}):(\d{1,2}(?:\.\d{1,3})?)\]/g)];
+        if (!stamps.length) continue;
+        // tira as marcas de tempo de cada palavra (<00:18.89>)
+        const words = raw.replace(/\[[^\]]*\]/g, "").replace(/<\d{1,3}:\d{1,2}(?:\.\d{1,3})?>/g, "").replace(/\s+/g, " ").trim().slice(0, 300);
+        for (const s of stamps) out.push({ t: Number(s[1]) * 60 + Number(s[2]), text: words });
+    }
+    return out.sort((x, y) => x.t - y.t);
+}
+
+async function lrclib(path: string) {
+    const r = await fetch("https://lrclib.net/api/" + path, { headers: { "user-agent": "pdLink (https://github.com/pdhenklein/pdlink)" }, signal: AbortSignal.timeout(10000) });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error("o site de letras nao respondeu (" + r.status + ")");
+    const text = await r.text();
+    if (text.length > 2_000_000) throw new Error("resposta grande demais");
+    return JSON.parse(text);
+}
+
+/** Acha a letra pelo nome. So vai ao LRCLIB o titulo e o artista da musica, nada sobre quem pede. */
+export async function musicLyrics(title: string, artist: string, dur: number): Promise<Lyrics> {
+    const { track, artist: a } = cleanTitle(title, artist);
+    if (!track) return { ok: false, error: "musica sem nome" };
+    const key = (track + "|" + a + "|" + Math.round(Number(dur) || 0)).toLowerCase();
+    const have = lyricCache.get(key);
+    if (have) return have;
+    try {
+        const d = Number(dur) || 0;
+        const seen: any[] = [];
+        for (const q of [a ? track + " " + a : track, track]) {
+            const list = await lrclib("search?q=" + encodeURIComponent(q));
+            if (Array.isArray(list)) seen.push(...list.slice(0, 20));
+            if (seen.some(x => x?.syncedLyrics)) break;
+        }
+        // a mais parecida: com tempo de linha, duracao perto e mesmo artista
+        const score = (x: any) => (x?.syncedLyrics ? 0 : 20) + (d > 0 ? Math.min(30, Math.abs(Number(x?.duration) - d)) : 0)
+            + (a && String(x?.artistName ?? "").toLowerCase().includes(a.toLowerCase()) ? 0 : 6);
+        // o nome tem que bater (o titulo do video pode vir como "Musica - Artista", entao aceito os dois lados)
+        const norm = (v: string) => String(v ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+        const like = (x: string, y: string) => { const p = norm(x), q = norm(y); return !!p && !!q && (p.includes(q) || q.includes(p)); };
+        const named = (x: any) => like(x?.trackName, track) || (!!a && like(x?.trackName, a) && like(x?.artistName, track));
+        const ok = seen.filter(x => x && (x.syncedLyrics || x.plainLyrics || x.instrumental) && named(x)
+            && (d <= 0 || Math.abs(Number(x.duration) - d) <= (a ? 20 : 3)));
+        ok.sort((x, y) => score(x) - score(y));
+        const best = ok[0];
+        const res: Lyrics = best
+            ? { ok: true, instrumental: !!best.instrumental, synced: typeof best.syncedLyrics === "string" ? parseLrc(best.syncedLyrics) : null, plain: typeof best.plainLyrics === "string" ? best.plainLyrics.slice(0, 20000) : null }
+            : { ok: false, error: "nao achei a letra dessa musica" };
+        if (lyricCache.size > 200) lyricCache.clear();
+        lyricCache.set(key, res);
+        return res;
+    } catch (e: any) {
+        note("musica: letra falhou - " + String(e?.message ?? e));
+        return { ok: false, error: "nao consegui buscar a letra agora" };
+    }
+}
