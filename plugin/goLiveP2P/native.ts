@@ -317,7 +317,7 @@ logLine("parte de fundo do pdLink iniciada");
 
 // ---- musica
 musicInit(PACKAGED ? join(PKG_DIR, "..", "music") : "F:/Discord2/probe/music", t => logLine(t));
-setTimeout(musicClean, 30000);
+setTimeout(musicClean, 30000); setInterval(musicClean, 6 * 3600 * 1000);
 export function musicSearch(_: IpcMainInvokeEvent, query: string) { return mSearch(query); }
 export function musicFetch(_: IpcMainInvokeEvent, ref: string) { return mFetch(String(ref)); }
 export function musicClock(_: IpcMainInvokeEvent) { return mClock(); }

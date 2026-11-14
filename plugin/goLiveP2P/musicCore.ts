@@ -2,6 +2,8 @@
  * pdLink - musica sincronizada na chamada.
  * Este arquivo e o "cerebro" da fila: nao toca som nem fala com a rede, so guarda o estado e decide quem vence
  * quando duas pessoas mexem ao mesmo tempo. Assim da para testar fora do Discord.
+ *
+ * A fila funciona como nos players: a primeira da lista e a que esta tocando; quando ela acaba, sai da fila.
  */
 
 export interface Track {
@@ -27,10 +29,13 @@ export interface MusicState {
     /** numero da versao: quem tem o maior vence; empate decide pelo `who` */
     rev: number;
     who: string;
+    /** a primeira e a musica atual */
     queue: Track[];
-    /** id da musica atual ("" = nada tocando) */
+    /** id da musica atual ("" = nada tocando); sempre a primeira da fila */
     cur: string;
     playing: boolean;
+    /** a musica atual ainda esta carregando: o tempo nao anda ate alguem terminar de carregar */
+    wait: boolean;
     /** posicao (segundos) valida no instante `at` */
     pos: number;
     /** instante do relogio comum (ms) em que `pos` valia */
@@ -41,21 +46,24 @@ export interface MusicState {
 export const MAX_QUEUE = 300;
 /** folga para todo mundo comecar junto depois de um comando (ms) */
 export const LEAD_MS = 250;
+/** folga depois que a musica carrega em alguem, para os outros terminarem de carregar tambem (ms) */
+export const BEGIN_LEAD_MS = 700;
 /** estado parado ha mais tempo que isso e esquecido (ms) */
 export const STALE_MS = 12 * 3600 * 1000;
 
-export const emptyState = (): MusicState => ({ rev: 0, who: "", queue: [], cur: "", playing: false, pos: 0, at: 0, loop: "off" });
+export const emptyState = (): MusicState => ({ rev: 0, who: "", queue: [], cur: "", playing: false, wait: false, pos: 0, at: 0, loop: "off" });
 
 export const newer = (a: Pick<MusicState, "rev" | "who">, b: Pick<MusicState, "rev" | "who">) =>
     a.rev !== b.rev ? a.rev > b.rev : a.who > b.who;
 
-export const currentTrack = (s: MusicState) => s.queue.find(t => t.id === s.cur) ?? null;
+export const currentTrack = (s: MusicState) => (s.cur && s.queue[0]?.id === s.cur ? s.queue[0] : null);
 
 /** posicao da musica atual no instante `now` do relogio comum */
 export function positionAt(s: MusicState, now: number) {
     const t = currentTrack(s);
     if (!t) return 0;
-    let p = s.playing ? s.pos + (now - s.at) / 1000 : s.pos;
+    let p = s.playing && !s.wait ? s.pos + (now - s.at) / 1000 : s.pos;
+    if (p < s.pos && s.playing) p = s.pos;
     if (p < 0) p = 0;
     if (t.dur > 0 && p > t.dur) p = t.dur;
     return p;
@@ -73,11 +81,12 @@ export function sanitize(m: any): MusicState | null {
         const id = str(t?.id, 24);
         if (!id || seen.has(id)) continue;
         seen.add(id);
-        queue.push({ id, src: str(t.src, 8), ref: str(t.ref, 400), title: str(t.title, 200), artist: str(t.artist, 120), dur: Math.max(0, num(t.dur)), by: str(t.by, 25), img: /^https:\/\//.test(str(t.img, 300)) ? str(t.img, 300) : "" });
+        const img = str(t.img, 300);
+        queue.push({ id, src: str(t.src, 8), ref: str(t.ref, 400), title: str(t.title, 200), artist: str(t.artist, 120), dur: Math.max(0, num(t.dur)), by: str(t.by, 25), img: /^https:\/\//.test(img) ? img : "" });
     }
-    const cur = seen.has(str(m.cur, 24)) ? str(m.cur, 24) : "";
+    const cur = queue[0]?.id ?? "";
     const loop: LoopMode = m.loop === "one" || m.loop === "all" ? m.loop : "off";
-    return { rev: Math.max(0, Math.floor(num(m.rev))), who: str(m.who, 25), queue, cur, playing: !!m.playing && !!cur, pos: Math.max(0, num(m.pos)), at: num(m.at), loop };
+    return { rev: Math.max(0, Math.floor(num(m.rev))), who: str(m.who, 25), queue, cur, playing: !!m.playing && !!cur, wait: !!m.wait && !!cur, pos: Math.max(0, num(m.pos)), at: num(m.at), loop };
 }
 
 export type Action =
@@ -91,21 +100,24 @@ export type Action =
     | { t: "nudge"; by: number; }
     | { t: "jump"; id: string; }
     | { t: "next"; }
-    | { t: "prev"; }
+    | { t: "restart"; }
+    /** a musica `id` terminou de carregar em alguem: o tempo comeca a andar */
+    | { t: "begin"; id: string; }
     | { t: "loop"; mode: LoopMode; };
 
-function startTrack(s: MusicState, id: string, at: number, playing = true) {
-    s.cur = id;
+/** A primeira da fila vira a atual, esperando carregar. */
+function startFirst(s: MusicState, at: number, playing = true) {
+    s.cur = s.queue[0]?.id ?? "";
     s.pos = 0;
     s.at = at;
-    s.playing = playing && !!id;
+    s.wait = !!s.cur;
+    s.playing = playing && !!s.cur;
 }
 
-function after(s: MusicState, wrap: boolean) {
-    const i = s.queue.findIndex(t => t.id === s.cur);
-    if (i < 0) return s.queue[0]?.id ?? "";
-    if (i + 1 < s.queue.length) return s.queue[i + 1].id;
-    return wrap ? s.queue[0].id : "";
+/** Tira a atual da frente (com "repetir a fila" ela vai para o fim). */
+function dropFirst(s: MusicState) {
+    const [old] = s.queue.splice(0, 1);
+    if (old && s.loop === "all") s.queue.push(old);
 }
 
 /** Aplica um comando de alguem. Devolve o estado novo (ou o mesmo objeto se nada mudou). */
@@ -118,26 +130,23 @@ export function apply(old: MusicState, a: Action, who: string, now: number): Mus
             const have = new Set(s.queue.map(t => t.id));
             const fresh = a.tracks.filter(t => t.id && !have.has(t.id)).slice(0, Math.max(0, MAX_QUEUE - s.queue.length));
             if (!fresh.length) return old;
-            const i = s.queue.findIndex(t => t.id === s.cur);
-            if (a.next && i >= 0) s.queue.splice(i + 1, 0, ...fresh); else s.queue.push(...fresh);
-            // fila estava parada no fim (ou vazia): ja comeca a tocar a primeira que entrou
-            if (!s.cur) startTrack(s, fresh[0].id, start);
+            if (a.next && s.queue.length) s.queue.splice(1, 0, ...fresh); else s.queue.push(...fresh);
+            // fila estava vazia: ja comeca a tocar a primeira que entrou
+            if (!old.cur) startFirst(s, now);
             break;
         }
         case "remove": {
             const i = s.queue.findIndex(t => t.id === a.id);
             if (i < 0) return old;
-            if (s.cur === a.id) {
-                const nxt = s.queue[i + 1]?.id ?? "";
-                s.queue.splice(i, 1);
-                startTrack(s, nxt, start, old.playing);
-            } else s.queue.splice(i, 1);
+            s.queue.splice(i, 1);
+            if (i === 0) startFirst(s, now, old.playing);
             break;
         }
         case "move": {
             const i = s.queue.findIndex(t => t.id === a.id);
-            if (i < 0) return old;
-            const to = Math.max(0, Math.min(s.queue.length - 1, Math.floor(a.to)));
+            // a que esta tocando fica sempre em primeiro
+            if (i < 1) return old;
+            const to = Math.max(1, Math.min(s.queue.length - 1, Math.floor(a.to)));
             if (to === i) return old;
             const [t] = s.queue.splice(i, 1);
             s.queue.splice(to, 0, t);
@@ -145,12 +154,12 @@ export function apply(old: MusicState, a: Action, who: string, now: number): Mus
         }
         case "clear":
             if (!s.queue.length) return old;
-            s.queue = []; startTrack(s, "", now, false);
+            s.queue = []; startFirst(s, now, false);
             break;
         case "play":
-            if (s.playing || !s.queue.length) return old;
-            if (!s.cur) startTrack(s, s.queue[0].id, start);
-            else { s.pos = here; s.at = start; s.playing = true; }
+            if (s.playing || !s.cur) return old;
+            s.playing = true;
+            if (!s.wait) { s.pos = here; s.at = start; }
             break;
         case "pause":
             if (!s.playing) return old;
@@ -166,22 +175,29 @@ export function apply(old: MusicState, a: Action, who: string, now: number): Mus
             s.pos = p; s.at = s.playing ? start : now;
             break;
         }
-        case "jump":
-            if (!s.queue.some(t => t.id === a.id)) return old;
-            startTrack(s, a.id, start);
+        case "jump": {
+            const i = s.queue.findIndex(t => t.id === a.id);
+            if (i < 1) return old;
+            const [t] = s.queue.splice(i, 1);
+            dropFirst(s);
+            s.queue.unshift(t);
+            startFirst(s, now);
             break;
-        case "next": {
+        }
+        case "next":
             if (!s.cur) return old;
-            startTrack(s, after(s, s.loop === "all"), start, true);
+            dropFirst(s);
+            startFirst(s, now);
             break;
-        }
-        case "prev": {
-            const i = s.queue.findIndex(t => t.id === s.cur);
-            if (i < 0) return old;
-            // como nos players: depois de 3 s, "voltar" recomeca a musica; antes disso, vai para a anterior
-            startTrack(s, here > 3 || i === 0 ? s.cur : s.queue[i - 1].id, start, true);
+        case "restart":
+            if (!s.cur) return old;
+            s.pos = 0; s.at = start; s.playing = true;
             break;
-        }
+        case "begin":
+            if (!s.wait || s.cur !== a.id) return old;
+            s.wait = false;
+            s.at = s.playing ? now + BEGIN_LEAD_MS : now;
+            break;
         case "loop":
             if (s.loop === a.mode) return old;
             s.loop = a.mode;
@@ -194,23 +210,23 @@ export function apply(old: MusicState, a: Action, who: string, now: number): Mus
 
 /**
  * A musica chegou ao fim: passa para a proxima. Todo mundo calcula isto sozinho e chega no MESMO resultado
- * (mesma versao, mesmo instante de inicio), entao ninguem precisa avisar ninguem e nao ha disputa.
+ * (mesma versao), entao ninguem precisa avisar ninguem e nao ha disputa.
  */
 export function advanceIfEnded(old: MusicState, now: number): MusicState {
     const t = currentTrack(old);
-    if (!t || !old.playing || t.dur <= 0) return old;
+    if (!t || !old.playing || old.wait || t.dur <= 0) return old;
     const endAt = old.at + (t.dur - old.pos) * 1000;
     if (now < endAt) return old;
     const s: MusicState = { ...old, queue: old.queue.slice() };
-    const nxt = old.loop === "one" ? t.id : after(s, old.loop === "all");
-    startTrack(s, nxt, endAt, true);
+    if (old.loop !== "one") dropFirst(s);
+    startFirst(s, endAt);
     s.rev = old.rev + 1;
     s.who = "~fim";
     return s;
 }
 
 export interface Transport {
-    /** publica o estado para a chamada (fica guardado para quem entrar depois) */
+    /** publica o estado para a chamada (`keep` = fica guardado para quem entrar depois) */
     publish(text: string, keep: boolean): void;
 }
 
@@ -263,10 +279,8 @@ export class MusicSync {
     }
 
     private checkEnd() {
-        let s = this.state, n = 0;
-        // varias musicas podem ter acabado se o PC ficou suspenso
-        for (; n < 50; n++) { const x = advanceIfEnded(s, this.now()); if (x === s) break; s = x; }
-        if (!n) return;
+        const s = advanceIfEnded(this.state, this.now());
+        if (s === this.state) return;
         this.state = s;
         this.onChange(s, false);
         // guarda no ponto de encontro para quem entrar depois; como todos mandam o mesmo texto, nao ha conflito

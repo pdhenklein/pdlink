@@ -7,7 +7,7 @@ import { MqttClient } from "./mqtt";
 // Brokers MQTT publicos, usados so para sinalizacao (textos de conexao e "quem esta ao vivo").
 const BROKERS = ["wss://broker.emqx.io:8084/mqtt", "wss://broker.hivemq.com:8884/mqtt"];
 
-const ICE: RTCConfiguration = {
+export const ICE: RTCConfiguration = {
     iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }]
 };
 
@@ -215,7 +215,7 @@ export class Hub {
         this.inboxTopic = `glp/v1/${this.ch}/in/${rand()}`;
         this.modTopic = `glp/v1/${this.ch}/mod/${mine}`;
         this.filesTopic = `glp/v1/${this.ch}/fx/${mine}`;
-        this.musicTopic = `glp/v1/${this.ch}/mu`;
+        this.musicTopic = `glp/v1/${this.ch}/mu2`;
         await this.open();
     }
 
@@ -289,6 +289,12 @@ export class Hub {
             this.mods.set(hash, at);
             if (!had) this.onMods();
         } catch { }
+    }
+
+    /** Musica do PC: pedidos e respostas da conexao de som ao vivo. */
+    onMusicSignal: (m: any) => void = () => { };
+    musicSignal() {
+        return this.mqtt ? { send: (inbox: string, msg: any) => this.send(inbox, msg), inbox: this.inboxTopic } : null;
     }
 
     /** Musica: publica o estado da fila para a chamada (`keep` = fica guardado para quem entrar depois). */
@@ -371,6 +377,7 @@ export class Hub {
         try { m = JSON.parse(payload); } catch { return; }
         const id = m.connectionId as string;
         if (m.type === "FOFFER" || m.type === "FANSWER" || m.type === "FCAND") { this.files.onSignal(m); return; }
+        if (m.type === "MOFFER" || m.type === "MANSWER") { this.onMusicSignal(m); return; }
         if (m.type === "OFFER") this.acceptOffer(m).catch(e => { this.error = String(e); });
         else if (m.type === "CANDIDATE") {
             const c = this.conns.get(id)?.pc ?? this.viewing.get(id)?.pc;

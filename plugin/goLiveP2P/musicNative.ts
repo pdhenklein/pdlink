@@ -58,7 +58,7 @@ function selfUpdate() {
 
 function run(args: string[], timeout: number) {
     return new Promise<string>((res, rej) => {
-        execFile(exe(), ["--no-warnings", "--no-config", "--ignore-config", ...args], { windowsHide: true, timeout, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (e, out, err) => {
+        execFile(exe(), ["--no-warnings", "--no-config", "--ignore-config", "--use-extractors", "default,-generic", ...args], { windowsHide: true, timeout, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (e, out, err) => {
             if (e) rej(new Error((String(err).trim().split("\n").filter(l => /ERROR/.test(l)).pop() ?? String(e.message)).replace(/^ERROR:\s*/, "").slice(0, 200)));
             else res(String(out));
         });
@@ -91,6 +91,52 @@ function toFound(e: any): Found | null {
     };
 }
 
+// ------------------------------------------------------------------ Suno
+// O yt-dlp nao aceita o Suno, entao leio a pagina publica da musica (a mesma que abre para quem recebe o link).
+
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
+const isSuno = (url: string) => { try { return /(^|\.)suno\.(com|ai)$/i.test(new URL(url).hostname); } catch { return false; } };
+const unescapeHtml = (t: string) => t.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#x27;|&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">");
+
+async function sunoPage(url: string): Promise<Found & { media: string; }> {
+    const r = await fetch(url, { headers: { "user-agent": UA }, redirect: "follow" });
+    // o link curto (suno.com/s/...) redireciona para a pagina da musica; confiro que continuou no Suno
+    if (!r.ok || !allowedUrl(r.url) || !isSuno(r.url)) throw new Error("nao consegui abrir essa pagina do Suno (" + r.status + ")");
+    const html = await r.text();
+    const id = r.url.match(/\/song\/([0-9a-f-]{36})/i)?.[1];
+    if (!id) throw new Error("esse link do Suno nao e de uma musica");
+    const media = html.match(new RegExp("https://cdn\\d\\.suno\\.ai/" + id + "\\.mp4", "i"))?.[0];
+    if (!media) throw new Error("essa musica do Suno nao esta publica");
+    const meta = (p: string) => unescapeHtml(html.match(new RegExp('<meta property="' + p + '" content="([^"]*)"'))?.[1] ?? "");
+    const img = meta("og:image");
+    return {
+        src: "suno", ref: "https://suno.com/song/" + id, media,
+        title: (meta("og:title") || "Musica do Suno").slice(0, 200),
+        artist: "Suno",
+        dur: Math.max(0, Number(html.match(/duration\\?":([0-9.]+)/)?.[1]) || 0),
+        img: /^https:\/\/cdn\d\.suno\.ai\//.test(img) ? img : ""
+    };
+}
+
+async function sunoDownload(ref: string, key: string) {
+    const page = await sunoPage(ref);
+    const r = await fetch(page.media, { headers: { "user-agent": UA, referer: "https://suno.com/" } });
+    if (!r.ok || !isSuno(r.url) || !r.body) throw new Error("o Suno nao entregou o audio (" + r.status + ")");
+    const MAX = 200 * 1024 * 1024;
+    if (Number(r.headers.get("content-length") ?? 0) > MAX) throw new Error("arquivo grande demais");
+    const parts: Uint8Array[] = [];
+    let size = 0;
+    const reader = r.body.getReader();
+    for (; ;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.length;
+        if (size > MAX) { reader.cancel().catch(() => { }); throw new Error("arquivo grande demais"); }
+        parts.push(value);
+    }
+    writeFileSync(join(cacheDir(), key + ".mp4"), Buffer.concat(parts));
+}
+
 /** Busca por nome, ou le um link (musica ou playlist). */
 export async function musicSearch(query: string): Promise<{ ok: true; items: Found[]; list: boolean; } | { ok: false; error: string; }> {
     try {
@@ -98,6 +144,10 @@ export async function musicSearch(query: string): Promise<{ ok: true; items: Fou
         if (!query) return { ok: true, items: [], list: false };
         const isUrl = /^https?:\/\//i.test(query);
         if (isUrl && !allowedUrl(query)) return { ok: false, error: "Esse site ainda nao e aceito. Use YouTube, SoundCloud ou Suno." };
+        if (isUrl && isSuno(query)) {
+            const { media: _m, ...found } = await sunoPage(query);
+            return { ok: true, items: [found], list: false };
+        }
         await ensureTool();
         const target = isUrl ? query : "ytsearch8:" + query;
         const out = await run(["-J", "--flat-playlist", "--playlist-end", "200", "--", target], 40000);
@@ -144,14 +194,14 @@ export async function musicFetch(ref: string): Promise<{ ok: true; data: Uint8Ar
             job = (async () => {
                 const have = cached(key);
                 if (have) return have;
-                await ensureTool();
                 mkdirSync(cacheDir(), { recursive: true });
                 const t0 = Date.now();
-                await run([
-                    "--no-playlist", "--no-part", "--max-filesize", "200M",
+                if (isSuno(ref)) await sunoDownload(ref, key);
+                else await ensureTool().then(() => run([
+                    "--no-playlist", "--playlist-items", "1", "--no-part", "--max-filesize", "200M",
                     "-f", "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio[protocol^=http]/bestaudio/best",
                     "-o", join(cacheDir(), key + ".%(ext)s"), "--", ref
-                ], 180000);
+                ], 180000));
                 const got = cached(key);
                 if (!got) throw new Error("o audio nao veio (arquivo grande demais ou formato nao aceito)");
                 note(`musica: audio baixado em ${Date.now() - t0} ms (${Math.round(statSync(got.file).size / 1024)} KB)`);

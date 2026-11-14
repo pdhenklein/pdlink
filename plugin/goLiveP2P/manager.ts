@@ -263,7 +263,7 @@ async function syncChannel() {
     h.nameOf = displayName;
     // arquivos: so aceito oferta de quem esta na chamada agora
     bindFiles({ hub: h, myId: self, nameOf: fullName });
-    startMusic(h, self, displayName).then(() => { if (hub === h) refreshPeers(); else stopMusic(); }).catch(() => { });
+    startMusic(h, self, displayName, id => others().includes(id)).then(() => { if (hub === h) refreshPeers(); else stopMusic(); }).catch(() => { });
     h.onFileOffer = (from, offer) => { if (others().includes(from)) handleOffer(from, fullName(from), offer); };
     h.onMods = () => { refreshPeers(); };
     h.onMark = (_uid, m: Mark) => nativeCall("overlayMark", JSON.stringify(m));
