@@ -103,7 +103,12 @@ export type Action =
     | { t: "restart"; }
     /** a musica `id` terminou de carregar em alguem: o tempo comeca a andar */
     | { t: "begin"; id: string; }
-    | { t: "loop"; mode: LoopMode; };
+    | { t: "loop"; mode: LoopMode; }
+    /** musica do Spotify: a versao do YouTube que todo mundo vai tocar */
+    | { t: "resolve"; id: string; ref: string; img: string; dur: number; };
+
+export const SPOTIFY_TRACK = /^https:\/\/open\.spotify\.com\/track\/[A-Za-z0-9]{22}$/;
+const YT_WATCH = /^https:\/\/www\.youtube\.com\/watch\?v=[\w-]{6,20}$/;
 
 /** A primeira da fila vira a atual, esperando carregar. */
 function startFirst(s: MusicState, at: number, playing = true) {
@@ -202,6 +207,16 @@ export function apply(old: MusicState, a: Action, who: string, now: number): Mus
             if (s.loop === a.mode) return old;
             s.loop = a.mode;
             break;
+        case "resolve": {
+            // so vale uma vez: a primeira escolha que chegar fica para todos
+            const i = s.queue.findIndex(t => t.id === a.id);
+            const t = s.queue[i];
+            if (!t || t.src !== "spotify" || !SPOTIFY_TRACK.test(t.ref) || !YT_WATCH.test(String(a.ref))) return old;
+            const img = String(a.img ?? "");
+            const dur = Number(a.dur);
+            s.queue[i] = { ...t, ref: a.ref, img: /^https:\/\//.test(img) ? img.slice(0, 300) : t.img, dur: dur > 0 && dur < 6 * 3600 ? dur : t.dur };
+            break;
+        }
     }
     s.rev = old.rev + 1;
     s.who = who;

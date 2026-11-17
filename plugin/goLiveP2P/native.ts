@@ -8,7 +8,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 import { closeAll, closeFile, openFile, reveal, saveDialog, writeFile } from "./fileNative";
-import { musicClean, musicClock as mClock, musicFetch as mFetch, musicInit, musicLyrics as mLyrics, musicSearch as mSearch } from "./musicNative";
+import { musicClean, musicClock as mClock, musicFetch as mFetch, musicInit, musicLyrics as mLyrics, musicResolve as mResolve, musicSearch as mSearch } from "./musicNative";
 import { overlayInfo, sendOverlay, showToast, startOverlay, stopOverlay } from "./overlay";
 import { discordUpdateExe, relaunchAfterExit } from "./updateRestart";
 
@@ -19,6 +19,7 @@ CspPolicies["wss://broker.hivemq.com:8884"] = ConnectSrc;
 CspPolicies["i.ytimg.com"] = ImageSrc;
 CspPolicies["*.sndcdn.com"] = ImageSrc;
 CspPolicies["*.suno.ai"] = ImageSrc;
+CspPolicies["i.scdn.co"] = ImageSrc;
 
 // Instalado (pacote): o auxiliar e a pagina de assistir ficam ao lado deste arquivo (patcher.js).
 // Desenvolvimento: usa as pastas do projeto.
@@ -321,6 +322,7 @@ setTimeout(musicClean, 30000); setInterval(musicClean, 6 * 3600 * 1000);
 export function musicSearch(_: IpcMainInvokeEvent, query: string) { return mSearch(query); }
 export function musicFetch(_: IpcMainInvokeEvent, ref: string) { return mFetch(String(ref)); }
 export function musicClock(_: IpcMainInvokeEvent) { return mClock(); }
+export function musicResolve(_: IpcMainInvokeEvent, ref: string, title: string, artist: string, dur: number) { return mResolve(String(ref ?? "").slice(0, 400), String(title ?? "").slice(0, 300), String(artist ?? "").slice(0, 200), Number(dur) || 0); }
 export function musicLyrics(_: IpcMainInvokeEvent, title: string, artist: string, dur: number) { return mLyrics(String(title ?? "").slice(0, 300), String(artist ?? "").slice(0, 200), Number(dur) || 0); }
 
 /** Linhas vindas da tela do Discord (ja juntadas em lotes). */

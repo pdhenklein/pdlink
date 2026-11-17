@@ -6,7 +6,7 @@ import * as DataStore from "@api/DataStore";
 import { PluginNative } from "@utils/types";
 
 import { plog } from "./logger";
-import { currentTrack, MusicSync, Track } from "./musicCore";
+import { currentTrack, MusicSync, SPOTIFY_TRACK, Track } from "./musicCore";
 import { MusicClient, MusicServer } from "./musicLink";
 import type { Found, Lyrics } from "./musicNative";
 import { MusicPlayer } from "./musicPlayer";
@@ -221,7 +221,32 @@ async function measureClock() {
     } catch { }
 }
 
-async function loadTrack(t: Track) {
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+/**
+ * Musica do Spotify: quem colocou acha a mesma musica no YouTube e manda a escolha para a chamada;
+ * os outros esperam essa escolha chegar, para todo mundo tocar exatamente a mesma versao.
+ */
+async function spotifyToYoutube(t: Track): Promise<string> {
+    const b = S.bound;
+    if (!b) throw new Error("a musica foi desligada");
+    if (typeof (Native as any)?.musicResolve !== "function") throw new Error("feche e abra o Discord para ativar o Spotify");
+    const live = () => b.sync.state.queue.find(x => x.id === t.id);
+    const ready = () => { const x = live(); return x && !SPOTIFY_TRACK.test(x.ref) ? x : null; };
+    // se quem colocou saiu da chamada, depois de um tempo eu mesmo procuro
+    if (t.by !== b.myId) for (let i = 0; i < 24 && !ready(); i++) { await sleep(500); if (!live()) throw new Error("a musica saiu da fila"); }
+    let x = ready();
+    if (!x) {
+        const r = await Native.musicResolve(t.ref, t.title, t.artist, t.dur);
+        if (!r.ok) throw new Error(r.error);
+        x = ready();
+        if (!x) { b.sync.do({ t: "resolve", id: t.id, ref: r.ref, img: r.img, dur: r.dur }); x = ready() ?? { ...t, ref: r.ref }; }
+    }
+    return loadTrack(x);
+}
+
+async function loadTrack(t: Track): Promise<string> {
+    if (t.src === "spotify" && SPOTIFY_TRACK.test(t.ref)) return spotifyToYoutube(t);
     if (isLocal(t)) {
         const p = parseLocal(t.ref);
         const l = p && p.inbox === myInbox() ? S.locals.find(x => x.key === p.key) : null;

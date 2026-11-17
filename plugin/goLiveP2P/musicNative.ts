@@ -18,7 +18,7 @@ const cacheDir = () => join(dir, "cache");
 const YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 
 /** So aceito enderecos destes sites: o endereco pode vir de outra pessoa da chamada. */
-const HOSTS = /^(?:[a-z0-9-]+\.)*(?:youtube\.com|youtu\.be|soundcloud\.com|suno\.com|suno\.ai)$/i;
+const HOSTS = /^(?:[a-z0-9-]+\.)*(?:youtube\.com|youtu\.be|soundcloud\.com|suno\.com|suno\.ai|open\.spotify\.com)$/i;
 export function allowedUrl(text: string) {
     try {
         const u = new URL(text);
@@ -70,7 +70,7 @@ export interface Found { src: string; ref: string; title: string; artist: string
 function srcOf(url: string) {
     try {
         const h = new URL(url).hostname;
-        return /youtu/.test(h) ? "yt" : /soundcloud/.test(h) ? "sc" : /suno/.test(h) ? "suno" : "url";
+        return /youtu/.test(h) ? "yt" : /soundcloud/.test(h) ? "sc" : /suno/.test(h) ? "suno" : /spotify/.test(h) ? "spotify" : "url";
     } catch { return "url"; }
 }
 
@@ -137,13 +137,119 @@ async function sunoDownload(ref: string, key: string) {
     writeFileSync(join(cacheDir(), key + ".mp4"), Buffer.concat(parts));
 }
 
+// ------------------------------------------------------------------ Spotify
+// O audio do Spotify e protegido, entao ninguem toca direto dele (nem os bots pagos). Leio da pagina publica do player
+// embutido o nome, os artistas, a duracao e a capa; na hora de tocar, acho a mesma musica no YouTube.
+
+const SPOTIFY_ID = /^[A-Za-z0-9]{22}$/;
+export const isSpotify = (url: string) => { try { return new URL(url).hostname === "open.spotify.com"; } catch { return false; } };
+const spotifyImg = (url: unknown) => {
+    const h = String(url ?? "").match(/^https:\/\/[a-z0-9.-]*(?:scdn\.co|spotifycdn\.com)\/image\/([0-9a-f]{20,64})$/i)?.[1];
+    return h ? "https://i.scdn.co/image/" + h : "";
+};
+const bestImg = (e: any) => {
+    const list: any[] = e?.visualIdentity?.image ?? e?.coverArt?.sources ?? [];
+    const pick = list.find(i => i?.maxWidth === 300) ?? list[0];
+    return spotifyImg(pick?.url);
+};
+const artistsOf = (e: any) => (Array.isArray(e?.artists) ? e.artists.map((a: any) => a?.name).filter(Boolean).join(", ") : String(e?.subtitle ?? "")).replace(/ /g, " ").slice(0, 120);
+
+/** "https://open.spotify.com/intl-pt/track/ID?si=..." vira { kind: "track", id: "ID" } */
+function spotifyParts(url: string) {
+    const m = url.match(/^https:\/\/open\.spotify\.com\/(?:intl-[a-z-]+\/)?(?:embed\/)?(track|album|playlist)\/([A-Za-z0-9]{22})(?:[/?#]|$)/i);
+    return m ? { kind: m[1].toLowerCase(), id: m[2] } : null;
+}
+
+async function spotifyEntity(kind: string, id: string) {
+    if (!SPOTIFY_ID.test(id)) throw new Error("link do Spotify invalido");
+    const r = await fetch(`https://open.spotify.com/embed/${kind}/${id}`, { headers: { "user-agent": UA }, signal: AbortSignal.timeout(15000) });
+    if (!r.ok) throw new Error("nao consegui abrir esse link do Spotify (" + r.status + ")");
+    const html = await r.text();
+    if (html.length > 5_000_000) throw new Error("pagina do Spotify grande demais");
+    const json = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/)?.[1];
+    const e = json ? JSON.parse(json)?.props?.pageProps?.state?.data?.entity : null;
+    if (!e) throw new Error("esse link do Spotify nao e publico");
+    return e;
+}
+
+/** Le uma musica, album ou playlist do Spotify. A ref de cada musica e o link dela no Spotify. */
+async function spotifyPage(url: string): Promise<{ items: Found[]; list: boolean; }> {
+    const p = spotifyParts(url);
+    if (!p) throw new Error("use um link de musica, album ou playlist do Spotify");
+    const e = await spotifyEntity(p.kind, p.id);
+    const track = (id: string, title: unknown, artist: string, ms: unknown, img: string): Found => ({
+        src: "spotify", ref: "https://open.spotify.com/track/" + id, img, artist,
+        title: String(title ?? "Sem nome").slice(0, 200),
+        dur: Math.max(0, Math.round(Number(ms) || 0) / 1000)
+    });
+    if (p.kind === "track") return { items: [track(p.id, e.name ?? e.title, artistsOf(e), e.duration, bestImg(e))], list: false };
+    // album e playlist: a capa de cada musica e acertada na hora de tocar
+    const cover = bestImg(e);
+    const items = (Array.isArray(e.trackList) ? e.trackList : []).slice(0, 300)
+        .map((t: any) => {
+            const id = String(t?.uri ?? "").split(":").pop() ?? "";
+            return SPOTIFY_ID.test(id) && t?.isPlayable !== false ? track(id, t.title, artistsOf(t), t.duration, cover) : null;
+        })
+        .filter((x: Found | null): x is Found => !!x);
+    if (!items.length) throw new Error("nao achei musicas nesse link do Spotify");
+    return { items, list: true };
+}
+
+const resolved = new Map<string, { ref: string; img: string; dur: number; }>();
+const BAD_VERSION = /\b(live|ao vivo|en vivo|cover|karaoke|instrumental|remix|8d|sped ?up|slowed|nightcore|reverb|acapella|acoustic|ac[uú]stico|reaction|tutorial|lyrics? video)\b/i;
+
+/** Acha no YouTube a mesma musica de um link do Spotify (duracao parecida, sem versao ao vivo, cover, remix...). */
+export async function musicResolve(ref: string, title: string, artist: string, dur: number): Promise<{ ok: true; ref: string; img: string; dur: number; } | { ok: false; error: string; }> {
+    try {
+        const p = spotifyParts(ref);
+        if (!p || p.kind !== "track") return { ok: false, error: "link do Spotify invalido" };
+        const have = resolved.get(p.id);
+        if (have) return { ok: true, ...have };
+        // a capa da propria musica (nas playlists a lista nao traz)
+        let img = "";
+        try { img = bestImg(await spotifyEntity("track", p.id)); } catch { }
+        await ensureTool();
+        const first = String(artist ?? "").split(",")[0].trim();
+        const name = String(title ?? "").slice(0, 150);
+        const out = await run(["-J", "--flat-playlist", "--", "ytsearch8:" + (first + " " + name).trim()], 40000);
+        const entries: any[] = JSON.parse(out)?.entries ?? [];
+        const d = Number(dur) || 0;
+        const norm = (v: string) => String(v ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+        const wantBad = BAD_VERSION.test(name);
+        const scored = entries
+            .filter(e => e?.id && /^[\w-]{6,20}$/.test(e.id))
+            .map(e => {
+                const t = norm(e.title), ch = norm(e.channel ?? e.uploader ?? "");
+                const diff = d > 0 && e.duration ? Math.abs(Number(e.duration) - d) : 5;
+                let s = Math.min(diff, 60);
+                if (!wantBad && BAD_VERSION.test(t)) s += 40;
+                if (!t.includes(norm(name).split(" (")[0].slice(0, 30))) s += 15;
+                if (first && (ch.includes(norm(first)) || ch.endsWith(" - topic"))) s -= 4;
+                return { e, s, diff };
+            })
+            .filter(x => d <= 0 || x.diff <= 15)
+            .sort((a, b) => a.s - b.s);
+        const best = scored[0]?.e;
+        if (!best) return { ok: false, error: "nao achei essa musica do Spotify no YouTube" };
+        const res = { ref: "https://www.youtube.com/watch?v=" + best.id, img: img || `https://i.ytimg.com/vi/${best.id}/mqdefault.jpg`, dur: Math.max(0, Number(best.duration) || 0) };
+        if (resolved.size > 500) resolved.clear();
+        resolved.set(p.id, res);
+        note(`musica: Spotify "${name}" -> YouTube ${best.id}`);
+        return { ok: true, ...res };
+    } catch (e: any) {
+        note("musica: Spotify falhou - " + String(e?.message ?? e));
+        return { ok: false, error: "nao consegui achar essa musica do Spotify agora" };
+    }
+}
+
 /** Busca por nome, ou le um link (musica ou playlist). */
 export async function musicSearch(query: string): Promise<{ ok: true; items: Found[]; list: boolean; } | { ok: false; error: string; }> {
     try {
         query = String(query ?? "").trim().slice(0, 400);
         if (!query) return { ok: true, items: [], list: false };
         const isUrl = /^https?:\/\//i.test(query);
-        if (isUrl && !allowedUrl(query)) return { ok: false, error: "Esse site ainda nao e aceito. Use YouTube, SoundCloud ou Suno." };
+        if (isUrl && !allowedUrl(query)) return { ok: false, error: "Esse site ainda nao e aceito. Use YouTube, SoundCloud, Suno ou Spotify." };
+        if (isUrl && isSpotify(query)) return { ok: true, ...await spotifyPage(query) };
         if (isUrl && isSuno(query)) {
             const { media: _m, ...found } = await sunoPage(query);
             return { ok: true, items: [found], list: false };
@@ -188,6 +294,8 @@ export function musicClean() {
 export async function musicFetch(ref: string): Promise<{ ok: true; data: Uint8Array; mime: string; } | { ok: false; error: string; }> {
     try {
         if (!allowedUrl(ref)) return { ok: false, error: "endereco nao aceito" };
+        // o Spotify nao entrega o audio: a musica precisa ser achada no YouTube antes (musicResolve)
+        if (isSpotify(ref)) return { ok: false, error: "essa musica do Spotify ainda nao foi achada no YouTube" };
         const key = createHash("sha1").update(ref).digest("hex").slice(0, 20);
         let job = fetching.get(key);
         if (!job) {
