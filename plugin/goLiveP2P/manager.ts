@@ -273,6 +273,8 @@ async function syncChannel() {
         return !!m?.localToken && !!localToken && m.localToken === localToken;
     };
     resolveTimer = setInterval(() => { applyPresence(); refreshPeers(); }, 5000);
+    // conectou depois (ponto de encontro estava fora e voltou): manda de novo o que precisa
+    h.onConnected = () => { if (hub !== h) return; hubError = ""; syncLive(); };
     try {
         await h.connect();
         hubError = "";

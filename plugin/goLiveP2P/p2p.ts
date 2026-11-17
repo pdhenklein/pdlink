@@ -216,7 +216,13 @@ export class Hub {
         this.modTopic = `glp/v1/${this.ch}/mod/${mine}`;
         this.filesTopic = `glp/v1/${this.ch}/fx/${mine}`;
         this.musicTopic = `glp/v1/${this.ch}/mu2`;
-        await this.open();
+        try {
+            await this.open();
+        } catch (e) {
+            // nenhum respondeu agora: continuo tentando enquanto estiver nesta chamada
+            this.scheduleReconnect();
+            throw e;
+        }
     }
 
     private async open() {
@@ -225,7 +231,10 @@ export class Hub {
             const m = new MqttClient();
             try {
                 await m.connect(url, "glp" + rand(), { topic: this.presenceTopic, payload: "", retain: true });
+                // saiu da chamada enquanto conectava: essa conexao nao serve mais
+                if (this.stopped) { m.close(); return; }
                 this.mqtt = m;
+                this.retries = 0;
                 this.brokerUsed = url;
                 plog(`ponto de encontro: conectado (${url.replace(/^wss?:\/\//, "").split("/")[0]})`);
                 m.onClose = () => { if (this.mqtt === m && !this.stopped) { plog("ponto de encontro: conexao caiu, reconectando"); this.scheduleReconnect(); } };
@@ -237,6 +246,7 @@ export class Hub {
                 this.announceMod();
                 if (!this.modTimer) this.modTimer = setInterval(() => this.announceMod(), 20000);
                 if (this.announced) this.announce(this.announced);
+                this.onConnected();
                 return;
             } catch (e) {
                 lastErr = e;
@@ -247,12 +257,19 @@ export class Hub {
         throw lastErr ?? new Error("nenhum broker respondeu");
     }
 
+    private retries = 0;
+    /** conectou (ou reconectou) ao ponto de encontro */
+    onConnected = () => { };
+
     private scheduleReconnect() {
         clearTimeout(this.reconnectTimer);
+        if (this.stopped) return;
+        // 3 s, 6 s, 12 s... ate 30 s entre as tentativas
+        const wait = Math.min(30000, 3000 * 2 ** Math.min(this.retries++, 4));
         this.reconnectTimer = setTimeout(() => {
             if (this.stopped) return;
             this.open().catch(() => this.scheduleReconnect());
-        }, 3000);
+        }, wait);
     }
 
     private onPresenceMsg(topic: string, payload: string) {
