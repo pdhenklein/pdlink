@@ -27,7 +27,7 @@ const PKG_DIR = __dirname;
 const PACKAGED = existsSync(join(PKG_DIR, "golive-helper.exe"));
 const VIEWER_PAGE = PACKAGED ? join(PKG_DIR, "viewer.html") : "F:/Discord2/Vencord/src/userplugins/goLiveP2P/viewer.html";
 const WATCH_PORT = 47615;
-const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p19.exe";
+const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p20.exe";
 // relatorios de diagnostico: no pacote ficam na pasta de dados do usuario
 const PROBE_DIR = PACKAGED ? join(PKG_DIR, "..", "logs") : "F:/Discord2/probe";
 
@@ -41,6 +41,7 @@ export interface StreamOpts {
     audio?: boolean;
     bitrate?: number; // H.264 pela placa de video
     cursor?: "follow" | "always" | "never";
+    codec?: "h264" | "hevc";
 }
 
 let server: Server | null = null;
@@ -106,7 +107,7 @@ export async function getSources(_: IpcMainInvokeEvent, q: SourcesQuery = {}) {
         }
     };
     // janelas que o seletor nativo do Discord nao mostra
-    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "golive-helper-p8.exe", "golive-helper-p12.exe", "golive-helper-p13.exe", "golive-helper-p14.exe", "golive-helper-p15.exe", "golive-helper-p16.exe", "golive-helper-p17.exe", "golive-helper-p18.exe", "golive-helper-p19.exe", "whatsapp.root.exe", "whatsapp.exe"]);
+    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "golive-helper-p8.exe", "golive-helper-p12.exe", "golive-helper-p13.exe", "golive-helper-p14.exe", "golive-helper-p15.exe", "golive-helper-p16.exe", "golive-helper-p17.exe", "golive-helper-p18.exe", "golive-helper-p19.exe", "golive-helper-p20.exe", "whatsapp.root.exe", "whatsapp.exe"]);
     list.windows = list.windows.filter((w: any) => !hidden.has(String(w.exe).toLowerCase()));
     const windows = list.windows.map((w: any) => ({ ...w, thumb: thumb("w" + w.hwnd), icon: icon("i" + w.hwnd) }));
     const monitors = list.monitors.map((m: any) => ({ ...m, thumb: thumb("m" + m.index) }));
@@ -186,7 +187,7 @@ export async function startStream(_: IpcMainInvokeEvent, o: StreamOpts) {
     args.push("--fps", String(o.fps), "--quality", String(o.quality), "--cursor", o.cursor ?? "follow");
     if (o.maxH > 0) args.push("--maxh", String(o.maxH));
     // video comprimido em H.264 na propria placa de video (se nao houver codificador por hardware, o auxiliar volta ao JPEG)
-    args.push("--codec", "h264", "--bitrate", String(Math.round(o.bitrate ?? 12e6)));
+    args.push("--codec", o.codec === "hevc" ? "hevc" : "h264", "--bitrate", String(Math.round(o.bitrate ?? 12e6)));
     if (o.audio !== false) {
         // janela: so o som do processo dela. Tela inteira: tudo menos o proprio Discord (evita eco da chamada)
         if (o.hwnd != null && o.pid) args.push("--pid", String(o.pid));
@@ -195,7 +196,7 @@ export async function startStream(_: IpcMainInvokeEvent, o: StreamOpts) {
 
     const proc = spawn(HELPER, args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
     helper = proc;
-    logLine(`captura: iniciada (${o.hwnd != null ? "janela" : "tela inteira " + (o.monitor ?? 0)}, ${o.maxH}p ${o.fps} fps, som ${o.audio !== false ? "sim" : "nao"})`);
+    logLine(`captura: iniciada (${o.hwnd != null ? "janela" : "tela inteira " + (o.monitor ?? 0)}, ${o.maxH}p ${o.fps} fps, ${o.codec === "hevc" ? "HEVC" : "H.264"}, som ${o.audio !== false ? "sim" : "nao"})`);
     let errLines = 0;
     // Tela inteira com som: anota quem esta tocando som e se faz parte do Discord. Se a voz do Discord vazar na live, este arquivo
     // (audio-sessoes.json, na pasta de logs) mostra qual programa esta refazendo o som do Discord.

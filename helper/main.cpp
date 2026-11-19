@@ -1183,14 +1183,16 @@ struct HwH264 {
     std::atomic<long> lastErr{ 0 }, firstErr{ 0 };
     std::atomic<int> firstStage{ 0 };
     std::function<void(bool, LONGLONG, const BYTE*, DWORD)> onOutput;
+    bool hevc = false; // HEVC (H.265): mesma qualidade com ~40% menos bits; o NVENC comprime igual, na placa
 
     static void setU4(ICodecAPI* a, const GUID& k, ULONG v) { VARIANT x; VariantInit(&x); x.vt = VT_UI4; x.ulVal = v; a->SetValue(&k, &x); }
     static void setBool(ICodecAPI* a, const GUID& k, bool v) { VARIANT x; VariantInit(&x); x.vt = VT_BOOL; x.boolVal = v ? VARIANT_TRUE : VARIANT_FALSE; a->SetValue(&k, &x); }
 
-    bool init(Gpu& g, UINT W, UINT H, UINT f, UINT br, std::string& err) {
-        w = W; h = H; fps = f; bitrate = br;
+    bool init(Gpu& g, UINT W, UINT H, UINT f, UINT br, std::string& err, bool useHevc = false) {
+        w = W; h = H; fps = f; bitrate = br; hevc = useHevc;
+        const GUID outFmt = hevc ? MFVideoFormat_HEVC : MFVideoFormat_H264;
         MFT_REGISTER_TYPE_INFO inInfo{ MFMediaType_Video, MFVideoFormat_NV12 };
-        MFT_REGISTER_TYPE_INFO outInfo{ MFMediaType_Video, MFVideoFormat_H264 };
+        MFT_REGISTER_TYPE_INFO outInfo{ MFMediaType_Video, outFmt };
         IMFActivate** acts = nullptr;
         UINT32 n = 0;
         ComPtr<IMFAttributes> ea;
@@ -1198,7 +1200,7 @@ struct HwH264 {
         ea->SetBlob(MFT_ENUM_ADAPTER_LUID, (const UINT8*)&g.luid, sizeof(LUID));
         if (FAILED(MFTEnum2(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, &inInfo, &outInfo, ea.Get(), &acts, &n)) || n == 0) {
             if (FAILED(MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, &inInfo, &outInfo, &acts, &n)) || n == 0) {
-                err = "nenhum codificador H.264 por hardware";
+                err = hevc ? "nenhum codificador HEVC por hardware" : "nenhum codificador H.264 por hardware";
                 return false;
             }
         }
@@ -1253,7 +1255,7 @@ struct HwH264 {
         ComPtr<IMFMediaType> ot;
         MFCreateMediaType(&ot);
         ot->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-        ot->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+        ot->SetGUID(MF_MT_SUBTYPE, outFmt);
         ot->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
         ot->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
         // grava no video como as cores foram convertidas (BT.709, faixa 16-235, igual ao conversor): quem assiste nao precisa adivinhar
@@ -1261,7 +1263,7 @@ struct HwH264 {
         ot->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
         ot->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
         ot->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
-        if (!envOn("GLV_NOPROF")) ot->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+        if (!envOn("GLV_NOPROF")) ot->SetUINT32(MF_MT_MPEG2_PROFILE, hevc ? (UINT32)eAVEncH265VProfile_Main_420_8 : (UINT32)eAVEncH264VProfile_High);
         MFSetAttributeSize(ot.Get(), MF_MT_FRAME_SIZE, w, h);
         MFSetAttributeRatio(ot.Get(), MF_MT_FRAME_RATE, fps, 1);
         MFSetAttributeRatio(ot.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
@@ -1425,11 +1427,12 @@ struct HwH264 {
         return true;
     }
 
-    static bool hasSps(const BYTE* p, DWORD len) {
+    bool hasSps(const BYTE* p, DWORD len) const {
         for (DWORD i = 0; i + 4 < len && i < 256; i++) {
             if (p[i] == 0 && p[i + 1] == 0 && (p[i + 2] == 1 || (p[i + 2] == 0 && p[i + 3] == 1))) {
                 DWORD k = p[i + 2] == 1 ? i + 3 : i + 4;
-                if ((p[k] & 0x1F) == 7) return true;
+                // H.264: SPS = 7; HEVC: VPS = 32, SPS = 33 (tipo nos bits 1-6 do primeiro byte)
+                if (hevc ? (((p[k] >> 1) & 0x3F) == 32 || ((p[k] >> 1) & 0x3F) == 33) : ((p[k] & 0x1F) == 7)) return true;
             }
         }
         return false;
@@ -1497,6 +1500,7 @@ struct StreamOpts {
     int testSizeBias = 0;       // so para teste: finge que o tamanho inicial era maior (simula janela que muda de tamanho)
     bool testNoReuse = false;   // so para teste: desliga o reaproveitamento do quadro
     bool h264 = false;          // comprimir na placa de video (H.264) em vez de JPEG
+    bool hevc = false;          // com h264: usar HEVC (H.265) no lugar do H.264
     UINT bitrate = 12000000;
 };
 
@@ -1545,7 +1549,14 @@ static int runStream(StreamOpts o) {
     for (auto& c : contentTs) c = -1;
     if (o.h264) {
         std::string err;
-        if (conv.init(g, W, H, OW, OH, (UINT)o.fps, err) && enc.init(g, OW, OH, (UINT)o.fps, o.bitrate, err)) {
+        bool encOk = conv.init(g, W, H, OW, OH, (UINT)o.fps, err) && enc.init(g, OW, OH, (UINT)o.fps, o.bitrate, err, o.hevc);
+        if (!encOk && o.hevc && err.find("HEVC") != std::string::npos) {
+            fprintf(stderr, "hevc: %s; usando H.264\n", err.c_str());
+            o.hevc = false;
+            err.clear();
+            encOk = enc.init(g, OW, OH, (UINT)o.fps, o.bitrate, err, false);
+        }
+        if (encOk) {
             gpuMode = true;
             enc.onOutput = [&](bool key, LONGLONG ts, const BYTE* p, DWORD len) {
                 std::vector<BYTE> pk(9 + (size_t)len);
@@ -1559,7 +1570,7 @@ static int runStream(StreamOpts o) {
                 if (!writePacket(3, pk.data(), (uint32_t)pk.size())) running = false;
             };
             char cfg[600];
-            snprintf(cfg, sizeof cfg, "{\"codec\":\"h264\",\"w\":%u,\"h\":%u,\"fps\":%d,\"encoder\":\"%s\",\"gpu\":\"%s\"}", OW, OH, o.fps, jsonEscape(enc.name).c_str(), jsonEscape(g.adapterName).c_str());
+            snprintf(cfg, sizeof cfg, "{\"codec\":\"%s\",\"w\":%u,\"h\":%u,\"fps\":%d,\"encoder\":\"%s\",\"gpu\":\"%s\"}", o.hevc ? "hevc" : "h264", OW, OH, o.fps, jsonEscape(enc.name).c_str(), jsonEscape(g.adapterName).c_str());
             writePacket(4, (const BYTE*)cfg, (uint32_t)strlen(cfg));
             if (enc.async) pumpThread = std::thread([&] { winrt::init_apartment(winrt::apartment_type::multi_threaded); enc.pump(running); });
             fprintf(stderr, "h264: placa de video %s, codificador %s, %ux%u %d fps %u bps async=%d entrada=%s\n", g.adapterName.c_str(), enc.name.c_str(), OW, OH, o.fps, o.bitrate, (int)enc.async, enc.memMode ? "memoria" : "textura");
@@ -2081,7 +2092,7 @@ int wmain(int argc, wchar_t** argv) {
             else if (a == L"--pid") o.pid = (DWORD)_wtoi(next().c_str());
             else if (a == L"--exclude-pid") o.excludePid = (DWORD)_wtoi(next().c_str());
             else if (a == L"--threads") o.threads = std::max(1, std::min(8, _wtoi(next().c_str())));
-            else if (a == L"--codec") o.h264 = next() == L"h264";
+            else if (a == L"--codec") { std::wstring c = next(); o.h264 = c == L"h264" || c == L"hevc"; o.hevc = c == L"hevc"; }
             else if (a == L"--bitrate") o.bitrate = (UINT)_wtoi(next().c_str());
             else if (a == L"--cursor") o.cursor = toUtf8(next());
             else if (a == L"--test-drop") o.testDrop = _wtoi(next().c_str());

@@ -1,7 +1,7 @@
 import type { PluginNative } from "@utils/types";
 import { FluxDispatcher } from "@webpack/common";
 
-import { HwDecoder, h264CodecFor, VideoConfig } from "./hwvideo";
+import { HwDecoder, h264CodecFor, hevcCodecFor, VideoConfig } from "./hwvideo";
 import { settings } from "./settings";
 import type * as NativeTypes from "./native";
 
@@ -107,6 +107,17 @@ class LiveController {
         return () => { this.configSinks.delete(fn); };
     }
 
+    /** Espectadores em modo compativel (rtp) recebem a imagem desta previa: ai ela nao pode ficar em 15 por segundo. */
+    fullPreview = false;
+    /** HEVC: mesma nitidez com menos bits. So quando todos que assistem pela placa de video decodificam HEVC. */
+    hevc = false;
+
+    setHevc(on: boolean) {
+        if (this.hevc === on) return;
+        this.hevc = on;
+        if (this.running && this.source && this.source.kind !== "camera") this.start(this.source);
+    }
+
     requestKeyFrame() {
         Native.keyFrame().catch(() => { });
     }
@@ -114,14 +125,19 @@ class LiveController {
     private onH264Config(json: string) {
         let raw: any;
         try { raw = JSON.parse(json); } catch { return; }
-        const cfg: VideoConfig = { codec: h264CodecFor(raw.w, raw.h, raw.fps), w: raw.w, h: raw.h, fps: raw.fps, encoder: raw.encoder ?? "", gpu: raw.gpu ?? "" };
+        const cfg: VideoConfig = { codec: raw.codec === "hevc" ? hevcCodecFor(raw.w, raw.h, raw.fps) : h264CodecFor(raw.w, raw.h, raw.fps), w: raw.w, h: raw.h, fps: raw.fps, encoder: raw.encoder ?? "", gpu: raw.gpu ?? "" };
         this.videoMode = "h264";
         this.videoConfig = cfg;
         this.encoderName = raw.encoder ?? "";
         // previa local: decodifica pela placa de video so para desenhar o seu quadro no Discord
         this.previewDecoder?.close();
         const dec = new HwDecoder();
-        dec.onFrame = f => { this.paintFrame(f); f.close(); };
+        // previa da propria live: no maximo ~15 pinturas por segundo (espectadores continuam recebendo todos os quadros)
+        dec.onFrame = f => {
+            const now = performance.now();
+            if (this.fullPreview || now - this.lastDraw >= 62) this.paintFrame(f);
+            f.close();
+        };
         dec.onNeedKey = () => this.requestKeyFrame();
         this.previewDecoder = dec;
         dec.configure(cfg).then(() => this.requestKeyFrame()).catch(e => { this.error = "decodificador: " + String(e); });
@@ -257,7 +273,7 @@ class LiveController {
 
     /** Inicia a live ou troca a fonte/qualidade ao vivo (a faixa de video continua a mesma). */
     async start(src: LiveSource) {
-        if (!this.running) this.pushNativeSettings();
+        if (!this.running) { this.pushNativeSettings(); this.hevc = false; this.fullPreview = false; }
         this.source = src;
         this.error = "";
         const p = this.prefs;
@@ -274,7 +290,7 @@ class LiveController {
                     pid: src.kind === "window" ? src.pid : undefined,
                     audio: !p.muteAudio,
                     bitrate: hwBitrate(src.h ? (p.maxH ? Math.min(p.maxH, src.h) : src.h) : (p.maxH || 1440), p.fps),
-                    fps: p.fps, maxH: p.maxH, quality: 80, cursor: p.cursor
+                    fps: p.fps, maxH: p.maxH, quality: 80, cursor: p.cursor, codec: this.hevc ? "hevc" : "h264"
                 });
                 if (!this.abort) this.connect(port, token);
             }
@@ -411,24 +427,32 @@ class LiveController {
         try {
             const res = await fetch(`http://127.0.0.1:${port}/stream/${token}`, { signal: ac.signal });
             const reader = res.body!.getReader();
-            let pending = new Uint8Array(0);
+            // um buffer so, reaproveitado: cada pedaco que chega e copiado uma vez; o que sobra (meio quadro) volta para o comeco.
+            // Os quadros vao para frente como "vista" desse buffer: quem recebe (envio aos espectadores, previa) copia na hora.
+            let store = new Uint8Array(1 << 22);
+            let used = 0;
             for (; ;) {
                 const { value, done } = await reader.read();
                 if (done) break;
-                const joined = new Uint8Array(pending.length + value.length);
-                joined.set(pending);
-                joined.set(value, pending.length);
-                pending = joined;
+                if (used + value.length > store.length) {
+                    const bigger = new Uint8Array(Math.max(store.length * 2, used + value.length));
+                    bigger.set(store.subarray(0, used));
+                    store = bigger;
+                }
+                store.set(value, used);
+                used += value.length;
+                const pending = store.subarray(0, used);
+                const view = new DataView(store.buffer);
                 let off = 0;
                 let latest: Uint8Array | null = null;
                 while (pending.length - off >= 5) {
                     const type = pending[off];
-                    const len = new DataView(pending.buffer, pending.byteOffset + off + 1, 4).getUint32(0, true);
+                    const len = view.getUint32(off + 1, true);
                     if (pending.length - off < 5 + len) break;
                     const body = pending.subarray(off + 5, off + 5 + len);
                     off += 5 + len;
-                    if (type === 0) { latest = body; this.rxVideo++; this.videoMode = "jpeg"; }
-                    else if (type === 3) this.onH264Frame(body.slice());
+                    if (type === 0) { latest = body.slice(); this.rxVideo++; this.videoMode = "jpeg"; }
+                    else if (type === 3) this.onH264Frame(body);
                     else if (type === 4) this.onH264Config(new TextDecoder().decode(body));
                     else if (type === 1) this.pushAudio(body);
                     else if (type === 2) {
@@ -436,9 +460,9 @@ class LiveController {
                         this.setupAudio(this.audioRate);
                     }
                 }
-                pending = pending.slice(off);
+                if (off) { store.copyWithin(0, off, used); used -= off; }
                 // so o quadro mais novo importa: se chegaram varios de uma vez, descarta os velhos
-                if (latest) this.queueDraw(latest.slice());
+                if (latest) this.queueDraw(latest);
             }
         } catch (e) {
             if (!ac.signal.aborted) {

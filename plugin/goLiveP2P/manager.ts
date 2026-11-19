@@ -320,7 +320,9 @@ function syncLive() {
                 config: () => live.videoConfig,
                 onChunk: cb => live.addEncodedSink(cb),
                 onConfig: cb => live.addConfigSink(cb),
-                requestKey: () => live.requestKeyFrame()
+                requestKey: () => live.requestKeyFrame(),
+                setHevc: on => live.setHevc(on),
+                setFullPreview: on => { live.fullPreview = on; }
             }
         );
     } else {

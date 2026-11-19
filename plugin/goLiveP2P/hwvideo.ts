@@ -23,7 +23,42 @@ export function h264CodecFor(w: number, h: number, fps: number) {
     return "avc1.6400" + level;
 }
 
+/** HEVC (H.265, perfil Main): nivel pela quantidade de pixels por segundo. */
+export function hevcCodecFor(w: number, h: number, fps: number) {
+    const rate = w * h * fps;
+    const level = rate <= 133_693_440 ? 123 : rate <= 267_386_880 ? 150 : rate <= 534_773_760 ? 153 : 156;
+    return `hvc1.1.6.L${level}.B0`;
+}
+
+let hevcProbe: Promise<boolean> | null = null;
+/** Esta placa decodifica HEVC por hardware aqui dentro? (so assim quem transmite manda HEVC) */
+export function canDecodeHevc() {
+    return hevcProbe ??= (async () => {
+        try {
+            const r = await VideoDecoder.isConfigSupported({ codec: "hvc1.1.6.L153.B0", codedWidth: 2560, codedHeight: 1440, hardwareAcceleration: "prefer-hardware" } as any);
+            return !!r.supported;
+        } catch { return false; }
+    })();
+}
+
 // ------------------------------------------------------------------ transmissao em pedacos
+
+/** Cabecalho de um quadro (montado uma vez e mandado igual para todos os espectadores). */
+export function frameHeader(key: boolean, timestampUs: number, length: number) {
+    const head = new Uint8Array(HEADER);
+    const dv = new DataView(head.buffer);
+    dv.setUint8(0, MAGIC);
+    dv.setUint8(1, key ? 1 : 0);
+    dv.setFloat64(2, timestampUs);
+    dv.setUint32(10, length);
+    return head;
+}
+
+/** Manda cabecalho + quadro em fatias. O receptor (inclusive versoes antigas) aceita cabecalho sozinho na 1a mensagem. */
+export function sendFrameWithHeader(dc: RTCDataChannel, head: Uint8Array, data: Uint8Array) {
+    dc.send(head as any);
+    for (let off = 0; off < data.length; off += SLICE) dc.send(data.subarray(off, Math.min(data.length, off + SLICE)) as any);
+}
 
 export function sendFrame(dc: RTCDataChannel, key: boolean, timestampUs: number, data: Uint8Array) {
     const first = Math.min(data.length, SLICE - HEADER);
@@ -198,7 +233,7 @@ export class HwDecoder {
             use = { ...base, hardwareAcceleration: "prefer-software" } as any;
             sup = await VideoDecoder.isConfigSupported(use);
         }
-        if (!sup.supported) throw new Error("decodificador H.264 indisponivel neste navegador");
+        if (!sup.supported) throw new Error(`decodificador ${cfg.codec} indisponivel neste navegador`);
         const d = new VideoDecoder({
             output: f => { this.decoded++; this.onFrame(f); },
             error: e => { this.error = String(e); this.needKey = true; this.onNeedKey(); }

@@ -1,4 +1,4 @@
-import { FrameReceiver, HwDecoder, HwEncoder, LatestFramePainter, sendFrame, viewFg } from "./hwvideo";
+import { canDecodeHevc, FrameReceiver, frameHeader, HwDecoder, HwEncoder, LatestFramePainter, sendFrame, sendFrameWithHeader, viewFg } from "./hwvideo";
 import { FileEngine, FileOffer, sanitizeOffer } from "./fileXfer";
 import { Mark, sanitizeMark } from "./marksCore";
 import { plog, since } from "./logger";
@@ -154,6 +154,8 @@ export interface EncodedSource {
     onChunk(cb: (key: boolean, ts: number, data: Uint8Array) => void): () => void;
     onConfig(cb: (cfg: any) => void): () => void;
     requestKey(): void;
+    setHevc?(on: boolean): void;
+    setFullPreview?(on: boolean): void;
 }
 
 export interface WatchHandle {
@@ -178,6 +180,8 @@ interface BroadcastConn {
     cands: RTCIceCandidateInit[]; // meus candidatos, repetidos junto com a resposta (o ponto de encontro perde mensagens)
     answer?: any; // resposta ja enviada: se o espectador pedir de novo, vai a mesma
     t0: number;
+    hw?: boolean; // video pela placa de video (canal de dados); senao modo compativel (rtp)
+    hevc?: boolean; // decodifica HEVC por hardware
 }
 
 /** Ponto de encontro de um canal de voz: presenca ("quem esta ao vivo") + caixa de mensagens privada. */
@@ -481,6 +485,7 @@ export class Hub {
     }
 
     private fanOut(key: boolean, ts: number, data: Uint8Array) {
+        let head: Uint8Array | null = null;
         for (const dc of this.dcs) {
             if (dc.readyState !== "open") continue;
             if (dc.bufferedAmount > 3_000_000 && !key) {
@@ -494,7 +499,7 @@ export class Hub {
                 if (!key) continue;
                 this.waitKey.delete(dc);
             }
-            try { sendFrame(dc, key, ts, data); this.hwStats.sent++; } catch { }
+            try { sendFrameWithHeader(dc, head ??= frameHeader(key, ts, data.length), data); this.hwStats.sent++; } catch { }
         }
     }
 
@@ -598,6 +603,9 @@ export class Hub {
             else this.onViewers(this.viewers());
         };
         const useHw = !!m.hw && HwEncoder.available();
+        conn.hw = useHw;
+        conn.hevc = useHw && m.hevc === true;
+        this.scheduleVideoPath();
         pc.ondatachannel = ev => {
             if (ev.channel.label === "m") this.onMarkChannel(ev.channel, m.userId);
             else if (useHw) this.onDataChannel(ev.channel);
@@ -706,6 +714,24 @@ export class Hub {
         try { c.pc.close(); } catch { }
         this.conns.delete(id);
         this.onViewers(this.viewers());
+        this.scheduleVideoPath();
+    }
+
+    private pathTimer: any = null;
+    /** HEVC so se todos que assistem pela placa decodificam HEVC; previa cheia se alguem esta em modo compativel. Espera 1,5 s
+     * para juntar entradas e saidas seguidas (cada troca de codec reinicia a captura por um instante). */
+    private scheduleVideoPath() {
+        clearTimeout(this.pathTimer);
+        this.pathTimer = setTimeout(() => {
+            const all = [...this.conns.values()];
+            this.encoded?.setFullPreview?.(all.some(c => !c.hw));
+            const hw = all.filter(c => c.hw);
+            if (!hw.length) return;
+            const hevc = hw.every(c => c.hevc);
+            if (this.encoded && this.encoded.config()?.codec?.startsWith("hvc1") !== hevc)
+                plog(`live: video em ${hevc ? "HEVC (todos decodificam)" : "H.264 (" + hw.filter(c => !c.hevc).length + " sem HEVC)"}`);
+            this.encoded?.setHevc?.(hevc);
+        }, 1500);
     }
 
     // ---------------------------------------------------------- espectador
@@ -754,7 +780,7 @@ export class Hub {
                     try {
                         const o = JSON.parse(ev.data);
                         if (o.t === "cfg") {
-                            plog(`assistir: video da live ${o.w}x${o.h} ${o.fps} fps; quem transmite usa ${o.gpu || "placa desconhecida (versao antiga)"}, codificador ${o.encoder || "?"}`);
+                            plog(`assistir: video da live ${o.w}x${o.h} ${o.fps} fps ${o.codec?.startsWith("hvc1") ? "HEVC" : "H.264"}; quem transmite usa ${o.gpu || "placa desconhecida (versao antiga)"}, codificador ${o.encoder || "?"}`);
                             dec.configure(o).then(() => dec.onNeedKey()).catch(() => { });
                         }
                     } catch { }
@@ -820,7 +846,9 @@ export class Hub {
             };
             pc.createOffer().then(async offer => {
                 await pc.setLocalDescription(offer);
-                offerMsg = { type: "OFFER", connectionId: id, sdp: offer.sdp, userId: myDiscordId, hw: hwOk };
+                const hevc = hwOk && await canDecodeHevc();
+                plog(`assistir: decodificacao HEVC por hardware ${hevc ? "sim" : "nao"}`);
+                offerMsg = { type: "OFFER", connectionId: id, sdp: offer.sdp, userId: myDiscordId, hw: hwOk, hevc };
                 this.send(target.inbox, { ...offerMsg, cands });
             }).catch(e => { clearTimeout(timer); fail(String(e)); });
         });
