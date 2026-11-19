@@ -33,6 +33,7 @@ export interface LiveSource {
     pid?: number;
     monitor?: number;
     deviceId?: string;
+    h?: number; // altura real da janela ou tela, em pixels (a live nunca aumenta a imagem)
     label: string;
 }
 
@@ -272,7 +273,7 @@ class LiveController {
                     monitor: src.kind === "monitor" ? src.monitor : undefined,
                     pid: src.kind === "window" ? src.pid : undefined,
                     audio: !p.muteAudio,
-                    bitrate: hwBitrate(p.maxH, p.fps),
+                    bitrate: hwBitrate(src.h ? (p.maxH ? Math.min(p.maxH, src.h) : src.h) : (p.maxH || 1440), p.fps),
                     fps: p.fps, maxH: p.maxH, quality: 80, cursor: p.cursor
                 });
                 if (!this.abort) this.connect(port, token);
@@ -501,11 +502,12 @@ class LiveController {
 }
 
 /** Taxa de bits do H.264 por hardware (o NVENC sustenta isso sem pesar). */
-export function hwBitrate(maxH: number, fps: number) {
-    const h = maxH || 1440;
+/** Taxa pela altura que a live realmente sai (Fonte numa tela 1080p = taxa de 1080p, nao de 2K). */
+export function hwBitrate(h: number, fps: number) {
     // P2P nao tem o limite de 6-8 Mbps da Twitch: jogo com grama e particulas so fica limpo com taxa alta.
-    // Cada espectador recebe uma copia, entao 4 pessoas em 1440p60 = 120 Mbps de upload de quem transmite.
-    const base = h >= 1440 ? 50e6 : h >= 1080 ? 30e6 : h >= 720 ? 12e6 : 6e6;
+    // Cada espectador recebe uma copia, entao 4 pessoas em 1440p60 = 200 Mbps de upload de quem transmite.
+    // faixas com folga: janela 1920x1032 (sem a barra de tarefas) conta como 1080p
+    const base = h >= 1300 ? 50e6 : h >= 900 ? 30e6 : h >= 650 ? 12e6 : 6e6;
     return Math.round(base * (fps >= 60 ? 1 : fps >= 30 ? 0.65 : 0.4));
 }
 

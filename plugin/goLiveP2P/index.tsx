@@ -319,14 +319,14 @@ function LiveModal({ modalProps }: { modalProps: any; }) {
                             <SourceCard
                                 key={w.hwnd} title={w.title} icon={w.icon} thumb={w.thumb}
                                 fallback={w.min ? "Minimizada: a live começa quando a janela voltar" : undefined}
-                                onShare={() => share({ kind: "window", hwnd: w.hwnd, pid: w.pid, label: w.title })}
+                                onShare={() => share({ kind: "window", hwnd: w.hwnd, pid: w.pid, h: w.h, label: w.title })}
                             />
                         ))}
                         {tab === "screens" && sources?.monitors.map(m => (
                             <SourceCard
                                 key={m.index} title={`Tela ${m.index + 1}${m.primary ? " (principal)" : ""}`} thumb={m.thumb}
                                 icon={null}
-                                onShare={() => share({ kind: "monitor", monitor: m.index, label: `Tela ${m.index + 1}` })}
+                                onShare={() => share({ kind: "monitor", monitor: m.index, h: m.h, label: `Tela ${m.index + 1}` })}
                             />
                         ))}
                         {tab === "devices" && cameras.map(d => (

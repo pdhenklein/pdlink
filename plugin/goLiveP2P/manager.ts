@@ -195,9 +195,14 @@ async function applyPresence() {
     }
 }
 
+// quem ja esta conectando: o Discord pode pedir "assistir" duas vezes seguidas, e cada pedido abria uma conexao
+// (a mesma live baixada 2 ou 4 vezes: o dobro de internet, de decodificacao e de placa de video)
+const connecting = new Set<string>();
+
 async function watch(userId: string) {
     const self = me();
-    if (!hub || !channelId || !self || handles.has(userId)) return;
+    if (!hub || !channelId || !self || handles.has(userId) || connecting.has(userId)) return;
+    connecting.add(userId);
     try {
         plog(`assistir: clicou para assistir ${displayName(userId)}`);
         const hash = await userHash(channelId, userId);
@@ -214,6 +219,8 @@ async function watch(userId: string) {
         console.warn("[pdLink] nao consegui assistir", e);
         plog(`assistir: nao consegui assistir ${displayName(userId)} - ${String(e)}`);
         hubError = String(e);
+    } finally {
+        connecting.delete(userId);
     }
 }
 
