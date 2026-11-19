@@ -12,6 +12,7 @@ import { getWatchUrl, startManager, stopManager } from "./manager";
 import { Settings } from "@api/Settings";
 import { settings } from "./settings";
 import { getLiveEntry, refreshLiveOutput } from "./nativeUi";
+import { viewFilter } from "./hwvideo";
 import { CursorMode, getLive, listCameras, LiveSource, PRESETS, Preset, sourcesApi } from "./live";
 
 const Native = VencordNative.pluginHelpers.pdLink as PluginNative<typeof import("./native")>;
@@ -364,12 +365,35 @@ function LiveModal({ modalProps }: { modalProps: any; }) {
     );
 }
 
-// Menu da live de outra pessoa (botao direito no quadro): escolher onde o som dela toca
+// Limpeza (filtro que preserva bordas) e nitidez (CAS) aplicadas na placa de video em cada quadro das lives que eu assisto
+const VIEW_FILTERS = [
+    { id: "off", label: "Desligada (imagem original)", clean: 0, sharp: 0 },
+    { id: "low", label: "Leve", clean: 0.4, sharp: 0.3 },
+    { id: "mid", label: "Média", clean: 0.6, sharp: 0.6 },
+    { id: "high", label: "Forte", clean: 0.8, sharp: 0.9 }
+];
+
+function applyViewFilter() {
+    const f = VIEW_FILTERS.find(v => v.id === settings.store.viewFilter) ?? VIEW_FILTERS[2];
+    viewFilter.clean = f.clean;
+    viewFilter.sharp = f.sharp;
+}
+
+// Menu da live de outra pessoa (botao direito no quadro): onde o som dela toca e o tratamento da imagem
 const streamContext: NavContextMenuPatchCallback = (children, { stream }: { stream?: { ownerId?: string; }; }) => {
     const owner = stream?.ownerId;
     if (!owner || owner === UserStore.getCurrentUser()?.id || !getLiveEntry(owner)) return;
     children.push(
         <Menu.MenuSeparator />,
+        <Menu.MenuItem id="pdlink-view-filter" label="Limpeza e nitidez da imagem">
+            {VIEW_FILTERS.map(f => (
+                <Menu.MenuRadioItem
+                    key={f.id} group="pdlink-view-filter-g" id={"pdlink-view-" + f.id} label={f.label}
+                    checked={settings.store.viewFilter === f.id}
+                    action={() => { settings.store.viewFilter = f.id; applyViewFilter(); }}
+                />
+            ))}
+        </Menu.MenuItem>,
         <Menu.MenuCheckboxItem
             id="pdlink-live-output-default"
             label="Som da live na saída padrão do Windows"
@@ -546,6 +570,7 @@ export default definePlugin({
 
     start() {
         migrateLegacySettings();
+        applyViewFilter();
         createPill();
         startManager();
         updateTimer = setInterval(checkUpdateReady, 5_000);

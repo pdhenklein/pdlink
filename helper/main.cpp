@@ -1137,6 +1137,13 @@ struct GpuConverter {
     }
 };
 
+static int envNum(const char* name, int def) {
+    char* e = nullptr; size_t el = 0;
+    int v = def;
+    if (_dupenv_s(&e, &el, name) == 0 && e) { if (e[0]) v = atoi(e); free(e); }
+    return v;
+}
+
 static bool envOn(const char* name) {
     char* e = nullptr; size_t el = 0;
     bool on = false;
@@ -1227,9 +1234,12 @@ struct HwH264 {
             setU4(api.Get(), CODECAPI_AVEncCommonRateControlMode, eAVEncCommonRateControlMode_CBR);
             setU4(api.Get(), CODECAPI_AVEncCommonMeanBitRate, bitrate);
             setBool(api.Get(), CODECAPI_AVLowLatencyMode, true);
-            setU4(api.Get(), CODECAPI_AVEncMPVGOPSize, fps * 2);
+            // reserva de meio segundo: cena com muita particula pode gastar mais num quadro sem estourar a taxa media
+            setU4(api.Get(), CODECAPI_AVEncCommonBufferSize, bitrate / 2);
+            setU4(api.Get(), CODECAPI_AVEncMPVGOPSize, fps * 10);
             setU4(api.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
-            setU4(api.Get(), CODECAPI_AVEncCommonQualityVsSpeed, 50);
+            // 0 = mais rapido, 100 = melhor imagem (o NVENC e um circuito separado do 3D: nao rouba FPS do jogo)
+            setU4(api.Get(), CODECAPI_AVEncCommonQualityVsSpeed, (ULONG)envNum("GLV_QVS", 100));
         }
 
         ComPtr<IMFMediaType> ot;
@@ -1238,6 +1248,11 @@ struct HwH264 {
         ot->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
         ot->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
         ot->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+        // grava no video como as cores foram convertidas (BT.709, faixa 16-235, igual ao conversor): quem assiste nao precisa adivinhar
+        ot->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+        ot->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+        ot->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+        ot->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
         if (!envOn("GLV_NOPROF")) ot->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
         MFSetAttributeSize(ot.Get(), MF_MT_FRAME_SIZE, w, h);
         MFSetAttributeRatio(ot.Get(), MF_MT_FRAME_RATE, fps, 1);
@@ -1325,8 +1340,9 @@ struct HwH264 {
         s->AddBuffer(buf.Get());
         s->SetSampleTime(ts);
         s->SetSampleDuration(10000000LL / fps);
-        // o NVENC pode ignorar o tamanho de GOP pedido: forca um quadro-chave a cada 2 s (recuperacao rapida)
-        bool periodic = ts - lastKeyTs >= 20000000LL;
+        // o NVENC pode ignorar o tamanho de GOP pedido: forca um quadro-chave a cada 10 s. Quadro-chave e caro (em CBR a imagem
+        // borra um instante), e quem entra ou perde um pedaco ja pede um na hora (forceKey)
+        bool periodic = ts - lastKeyTs >= 100000000LL;
         if ((forceKey.exchange(false) || periodic) && api) {
             setU4(api.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1);
             lastKeyTs = ts;
@@ -1581,8 +1597,7 @@ static int runStream(StreamOpts o) {
     // ultimo quadro entregue ao codificador (para reenviar quando a janela fica parada)
     ID3D11Texture2D* lastNv12 = nullptr; // aponta para lastFrameTex
     ComPtr<ID3D11Texture2D> lastFrameTex; // copia do ultimo quadro ja convertido (mesmo tamanho de saida, nao muda com a janela)
-    LONGLONG lastNv12Ts = 0;
-    double lastSubmitAt = 0;
+    std::atomic<uint64_t> capFrames{ 0 };
     bool testNoReuse = o.testNoReuse; // so para teste: comportamento antigo (descartar o quadro quando o tamanho muda)
     int testDrop = o.testDrop; // so para teste: ignora os primeiros quadros, simulando uma captura que nao entrega
     const double minGap = 1.0 / o.fps - 0.002;
@@ -1617,8 +1632,8 @@ static int runStream(StreamOpts o) {
                         if (mnv) {
                             if (!lastFrameTex) { D3D11_TEXTURE2D_DESC ld{}; mnv->GetDesc(&ld); g.dev->CreateTexture2D(&ld, nullptr, &lastFrameTex); }
                             if (lastFrameTex) { g.ctx->CopyResource(lastFrameTex.Get(), mnv); lastNv12 = lastFrameTex.Get(); }
-                            lastNv12Ts = mts - firstTs; lastSubmitAt = nowSec(); lastEmit = lastSubmitAt;
-                            enc.submit(mnv, mts - firstTs);
+                            lastEmit = nowSec();
+                            capFrames++;
                             fprintf(stderr, "quadro aproveitado apos mudar o tamanho\n");
                         }
                     }
@@ -1628,8 +1643,8 @@ static int runStream(StreamOpts o) {
             return;
         }
         double now = nowSec();
-        if (now - lastEmit < minGap) return;
         if (gpuMode) {
+            // so guarda o quadro mais novo; quem entrega ao codificador e o relogio fixo (cadenceThread)
             lastEmit = now;
             ComPtr<ID3D11Texture2D> gtex;
             auto gaccess = frame.Surface().as<IDirect3DDxgiInterfaceAccess>();
@@ -1640,11 +1655,11 @@ static int runStream(StreamOpts o) {
             if (nv12) {
                 if (!lastFrameTex) { D3D11_TEXTURE2D_DESC ld{}; nv12->GetDesc(&ld); g.dev->CreateTexture2D(&ld, nullptr, &lastFrameTex); }
                 if (lastFrameTex) { g.ctx->CopyResource(lastFrameTex.Get(), nv12); lastNv12 = lastFrameTex.Get(); }
-                lastNv12Ts = ts - firstTs; lastSubmitAt = now;
-                enc.submit(nv12, ts - firstTs);
+                capFrames++;
             }
             return;
         }
+        if (now - lastEmit < minGap) return;
         {
             std::lock_guard<std::mutex> qk(qMtx);
             if (queue.size() >= maxQueue) { dropped++; return; }
@@ -1755,40 +1770,63 @@ static int runStream(StreamOpts o) {
         });
     }
 
-    // O Windows so entrega quadro quando a janela muda. Janela parada = nenhum quadro novo, e quem acabou de entrar
-    // (ou pediu um quadro-chave) ficaria com a tela preta para sempre. Entao o ultimo quadro e reenviado: a cada 1 s
-    // enquanto parada, ou em ~120 ms quando alguem pediu um quadro-chave.
-    std::thread idleThread;
+    // Relogio fixo: o codificador recebe SEMPRE o numero de quadros por segundo combinado (60, 30...), como no OBS.
+    // O NVENC em CBR divide a taxa pelo fps combinado; se o jogo entrega menos quadros, cada um continua com a mesma fatia
+    // e a taxa real cai (medido: 7 Mbps pedidos, 2,4 Mbps saindo com ~22 quadros/s). Repetindo o ultimo quadro, a sobra
+    // vai para refinar a imagem. Tambem cobre a janela parada (que nao manda quadro novo) e o quadro-chave para quem entra.
+    std::thread cadenceThread;
     if (gpuMode) {
-        idleThread = std::thread([&] {
+        cadenceThread = std::thread([&] {
+            HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+            if (!timer) timer = CreateWaitableTimerW(nullptr, TRUE, nullptr);
+            ComPtr<ID3D11Texture2D> ring[6]; // o codificador assincrono pode ainda estar lendo os anteriores
+            const int fps = std::max(1, o.fps);
+            const LONGLONG period = 10000000LL / fps;
+            const double start = nowSec();
+            uint64_t n = 0;
             while (running) {
-                Sleep(60);
+                double due = start + (double)n / fps;
+                double wait = due - nowSec();
+                if (wait > 0.0005) {
+                    LARGE_INTEGER li; li.QuadPart = -(LONGLONG)(wait * 1e7);
+                    if (timer && SetWaitableTimer(timer, &li, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 1000);
+                    else Sleep(1);
+                    continue;
+                }
+                if (!running) break;
+                // atrasou mais de 3 quadros (PC travou): pula para o agora em vez de mandar uma rajada
+                if (-wait > 3.0 / fps) n = (uint64_t)((nowSec() - start) * fps);
                 {
                     std::lock_guard<std::mutex> lk(mtx);
-                    if (!running) break;
-                    double now = nowSec();
                     if (lastNv12) {
-                        double idle = now - lastSubmitAt;
-                        if (idle >= (enc.forceKey.load() ? 0.12 : 1.0)) {
-                            lastNv12Ts += (LONGLONG)(idle * 1e7);
-                            lastSubmitAt = now;
-                            enc.submit(lastNv12, lastNv12Ts);
+                        ComPtr<ID3D11Texture2D>& slot = ring[n % 6];
+                        if (!slot) { D3D11_TEXTURE2D_DESC d{}; lastNv12->GetDesc(&d); g.dev->CreateTexture2D(&d, nullptr, &slot); }
+                        if (slot) {
+                            g.ctx->CopyResource(slot.Get(), lastNv12);
+                            enc.submit(slot.Get(), (LONGLONG)n * period);
                         }
                     }
                 }
+                n++;
             }
+            if (timer) CloseHandle(timer);
         });
     }
 
     session.StartCapture();
     fprintf(stderr, "stream iniciado %ux%u fps=%d threads=%d\n", W, H, o.fps, o.threads);
     double lastStat = nowSec();
-    uint64_t lastSent = 0, lastEnc = 0, lastEncUs = 0;
+    uint64_t lastSent = 0, lastEnc = 0, lastEncUs = 0, lastCap = 0, lastIn = 0;
     while (running) {
         Sleep(50);
         double now = nowSec();
         if (now - lastStat >= 2.0) {
             uint64_t s = sent, e = encCount, us = encMicros;
+            if (gpuMode) {
+                uint64_t c = capFrames, i = enc.inFrames;
+                fprintf(stderr, "stat cadencia capturados=%.1f/s codificados=%.1f/s\n", (c - lastCap) / (now - lastStat), (i - lastIn) / (now - lastStat));
+                lastCap = c; lastIn = i;
+            }
             if (gpuMode) fprintf(stderr, "stat h264 sub=%llu ev=%llu need=%llu have=%llu everr=%llu feederr=%llu first=0x%08lx@%d hr=0x%08lx in=%llu out=%llu kB=%llu\n", (unsigned long long)enc.submits.load(), (unsigned long long)enc.events.load(), (unsigned long long)enc.needEv.load(), (unsigned long long)enc.haveEv.load(), (unsigned long long)enc.evErrors.load(), (unsigned long long)enc.feedErrors.load(), (unsigned long)enc.firstErr.load(), enc.firstStage.load(), (unsigned long)enc.lastErr.load(), (unsigned long long)enc.inFrames.load(), (unsigned long long)enc.outFrames.load(), (unsigned long long)(h264Bytes.load() / 1024));
             fprintf(stderr, "stat fps=%.1f enc=%.1fms dropped=%llu audioKB=%llu\n",
                 (s - lastSent) / (now - lastStat), e > lastEnc ? (double)(us - lastEncUs) / (e - lastEnc) / 1000.0 : 0.0,
@@ -1802,7 +1840,7 @@ static int runStream(StreamOpts o) {
     try { pool.Close(); } catch (...) {}
     if (ct.joinable()) ct.join();
     if (at.joinable()) at.join();
-    if (idleThread.joinable()) idleThread.join();
+    if (cadenceThread.joinable()) cadenceThread.join();
     if (pumpThread.joinable()) {
         enc.wake();
         // se mesmo assim nao houver evento, nao trava o encerramento

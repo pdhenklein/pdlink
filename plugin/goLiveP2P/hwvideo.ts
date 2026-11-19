@@ -234,20 +234,156 @@ export class HwDecoder {
 }
 
 /** Desenha so o quadro mais novo a cada vez que o navegador pinta (descarta os atrasados). */
+/**
+ * Tratamento da imagem de quem assiste, feito na placa de video a cada quadro:
+ * clean = limpeza (suaviza so diferencas pequenas, como restos de compressao; bordas ficam), 0 a 1;
+ * sharp = nitidez (CAS, Contrast Adaptive Sharpening da AMD FidelityFX), 0 a 1. Os dois em 0 = imagem original.
+ */
+export const viewFilter = { clean: 0.5, sharp: 0.5 };
+
+const VS = `#version 300 es
+in vec2 p; out vec2 uv;
+void main() { uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); gl_Position = vec4(p, 0.0, 1.0); }`;
+
+// limpeza: media dos 3x3 vizinhos, pesando so os que tem cor parecida com o centro (filtro bilateral)
+const FS_CLEAN = `#version 300 es
+precision highp float;
+uniform sampler2D t; uniform float k; in vec2 uv; out vec4 o;
+void main() {
+    ivec2 lim = textureSize(t, 0) - 1, at = ivec2(gl_FragCoord.xy);
+    vec3 c = texelFetch(t, at, 0).rgb;
+    vec3 sum = c; float ws = 1.0;
+    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+        if (x == 0 && y == 0) continue;
+        vec3 n = texelFetch(t, clamp(at + ivec2(x, y), ivec2(0), lim), 0).rgb;
+        vec3 d = n - c;
+        float w = exp(-dot(d, d) * k) * ((x == 0 || y == 0) ? 1.0 : 0.6);
+        sum += n * w; ws += w;
+    }
+    o = vec4(sum / ws, 1.0);
+}`;
+
+// nitidez: CAS. Mede o contraste local (minimo e maximo da vizinhanca) e afia mais onde ha pouco contraste
+const FS_SHARP = `#version 300 es
+precision highp float;
+uniform sampler2D t; uniform float s; in vec2 uv; out vec4 o;
+// a linha 0 da textura e o topo da imagem, mas na tela a linha 0 e embaixo: aqui a imagem e desvirada
+vec3 at(int x, int y) {
+    ivec2 lim = textureSize(t, 0) - 1;
+    ivec2 base = ivec2(int(gl_FragCoord.x), lim.y - int(gl_FragCoord.y));
+    return texelFetch(t, clamp(base + ivec2(x, y), ivec2(0), lim), 0).rgb;
+}
+void main() {
+    vec3 a = at(-1, -1), b = at(0, -1), c = at(1, -1);
+    vec3 d = at(-1, 0), e = at(0, 0), f = at(1, 0);
+    vec3 g = at(-1, 1), h = at(0, 1), i = at(1, 1);
+    if (s <= 0.0) { o = vec4(e, 1.0); return; }
+    vec3 mn = min(min(min(d, e), min(f, b)), h);
+    mn += min(mn, min(min(a, c), min(g, i)));
+    vec3 mx = max(max(max(d, e), max(f, b)), h);
+    mx += max(mx, max(max(a, c), max(g, i)));
+    vec3 amp = sqrt(clamp(min(mn, 2.0 - mx) / max(mx, vec3(1e-5)), 0.0, 1.0));
+    vec3 w = amp * (-1.0 / mix(8.0, 5.0, s));
+    o = vec4(clamp(((b + d + f + h) * w + e) / (1.0 + 4.0 * w), 0.0, 1.0), 1.0);
+}`;
+
+class FilterGl {
+    private gl: WebGL2RenderingContext;
+    private src: WebGLTexture;
+    private mid: WebGLTexture;
+    private fb: WebGLFramebuffer;
+    private clean: WebGLProgram;
+    private sharp: WebGLProgram;
+    private w = 0;
+    private h = 0;
+
+    constructor(gl: WebGL2RenderingContext) {
+        this.gl = gl;
+        const prog = (fs: string) => {
+            const p = gl.createProgram()!;
+            for (const [type, code] of [[gl.VERTEX_SHADER, VS], [gl.FRAGMENT_SHADER, fs]] as const) {
+                const sh = gl.createShader(type)!;
+                gl.shaderSource(sh, code);
+                gl.compileShader(sh);
+                if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh) ?? "shader");
+                gl.attachShader(p, sh);
+            }
+            gl.bindAttribLocation(p, 0, "p");
+            gl.linkProgram(p);
+            if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p) ?? "programa");
+            return p;
+        };
+        this.clean = prog(FS_CLEAN);
+        this.sharp = prog(FS_SHARP);
+        const buf = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+        const tex = () => {
+            const t = gl.createTexture()!;
+            gl.bindTexture(gl.TEXTURE_2D, t);
+            for (const k of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, k, gl.NEAREST);
+            for (const k of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T]) gl.texParameteri(gl.TEXTURE_2D, k, gl.CLAMP_TO_EDGE);
+            return t;
+        };
+        this.src = tex();
+        this.mid = tex();
+        this.fb = gl.createFramebuffer()!;
+    }
+
+    draw(f: VideoFrame, w: number, h: number) {
+        const { gl } = this;
+        if (w !== this.w || h !== this.h) {
+            this.w = w; this.h = h;
+            gl.bindTexture(gl.TEXTURE_2D, this.mid);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.mid, 0);
+        }
+        gl.viewport(0, 0, w, h);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, this.src);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, f as any);
+        const clean = Math.max(0, Math.min(1, viewFilter.clean));
+        let input = this.src;
+        if (clean > 0) {
+            // k alto = so diferencas bem pequenas sao suavizadas; clean 1 chega a ~0,06 de diferenca por canal
+            gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
+            gl.useProgram(this.clean);
+            gl.uniform1f(gl.getUniformLocation(this.clean, "k"), 1 / (2 * (0.035 * clean) ** 2));
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+            input = this.mid;
+        }
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.bindTexture(gl.TEXTURE_2D, input);
+        gl.useProgram(this.sharp);
+        gl.uniform1f(gl.getUniformLocation(this.sharp, "s"), Math.max(0, Math.min(1, viewFilter.sharp)));
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+}
+
 export class LatestFramePainter {
     private latest: VideoFrame | null = null;
     private raf = 0;
     private stopped = false;
     painted = 0;
+    filtered = false;
     onPaint: (w: number, h: number) => void = () => { };
 
     constructor(private canvas: HTMLCanvasElement) {
-        this.ctx = canvas.getContext("2d", { alpha: false, desynchronized: true })!;
+        // com WebGL o quadro passa pelo filtro de limpeza e nitidez; sem WebGL, desenho simples
+        try {
+            const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: false, desynchronized: true, preserveDrawingBuffer: true });
+            if (gl) { this.gl = new FilterGl(gl); this.filtered = true; }
+        } catch { }
+        if (!this.gl) this.ctx = canvas.getContext("2d", { alpha: false, desynchronized: true })!;
         this.loop = this.loop.bind(this);
         this.raf = requestAnimationFrame(this.loop);
     }
 
-    private ctx: CanvasRenderingContext2D;
+    private ctx: CanvasRenderingContext2D | null = null;
+    private gl: FilterGl | null = null;
 
     push(frame: VideoFrame) {
         this.latest?.close();
@@ -263,7 +399,8 @@ export class LatestFramePainter {
                 this.canvas.width = f.displayWidth;
                 this.canvas.height = f.displayHeight;
             }
-            this.ctx.drawImage(f, 0, 0);
+            if (this.gl) this.gl.draw(f, f.displayWidth, f.displayHeight);
+            else this.ctx!.drawImage(f, 0, 0);
             this.painted++;
             this.onPaint(f.displayWidth, f.displayHeight);
             f.close();

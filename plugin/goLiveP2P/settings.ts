@@ -18,5 +18,6 @@ export const settings = definePluginSettings({
     migrated: { type: OptionType.BOOLEAN, description: "Ja trouxe as escolhas do nome antigo (GoLiveP2P)", default: false, hidden: true },
     marksInCapture: { type: OptionType.BOOLEAN, description: "Ping e desenho aparecem em prints e gravacoes", default: false, hidden: true },
     allowMarks: { type: OptionType.BOOLEAN, description: "Aceitar ping e desenho dos espectadores", default: true, hidden: true },
+    viewFilter: { type: OptionType.STRING, description: "Limpeza e nitidez das lives que eu assisto (off, low, mid, high)", default: "mid", hidden: true },
     liveOutputDefault: { type: OptionType.BOOLEAN, description: "Som das lives na saida padrao do Windows (e nao na do Discord)", default: false, hidden: true }
 });

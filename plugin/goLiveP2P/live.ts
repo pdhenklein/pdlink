@@ -503,7 +503,9 @@ class LiveController {
 /** Taxa de bits do H.264 por hardware (o NVENC sustenta isso sem pesar). */
 export function hwBitrate(maxH: number, fps: number) {
     const h = maxH || 1440;
-    const base = h >= 1440 ? 18e6 : h >= 1080 ? 12e6 : h >= 720 ? 7e6 : 4e6;
+    // P2P nao tem o limite de 6-8 Mbps da Twitch: jogo com grama e particulas so fica limpo com taxa alta.
+    // Cada espectador recebe uma copia, entao 4 pessoas em 1440p60 = 120 Mbps de upload de quem transmite.
+    const base = h >= 1440 ? 50e6 : h >= 1080 ? 30e6 : h >= 720 ? 12e6 : 6e6;
     return Math.round(base * (fps >= 60 ? 1 : fps >= 30 ? 0.65 : 0.4));
 }
 
