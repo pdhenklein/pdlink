@@ -66,6 +66,7 @@ struct __declspec(uuid("A9B3D012-3DF2-4EE3-B8D1-8695F457D3C1")) IDirect3DDxgiInt
 
 // ---------------------------------------------------------------- utils
 
+static int envNum(const char* name, int def);
 static std::string toUtf8(const std::wstring& w) {
     if (w.empty()) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -842,6 +843,13 @@ static bool makeGpu(Gpu& g) {
             g.luid = ad.AdapterLuid;
             g.adapterName = toUtf8(ad.Description);
         }
+        // o trabalho da captura e pequeno, mas um jogo sem limite de fps enche a fila da placa e ele ficava no fim:
+        // prioridade alta faz a copia/conversao do quadro passar na frente (sem tirar tempo do jogo de verdade)
+        if (xd) {
+            int prio = (int)envNum("GLV_GPUPRIO", 7);
+            HRESULT ph = xd->SetGPUThreadPriority(prio);
+            fprintf(stderr, "prioridade na placa de video %d: %s\n", prio, SUCCEEDED(ph) ? "ok" : "recusada");
+        }
     }
     ComPtr<ID3D11Multithread> mt;
     if (SUCCEEDED(g.dev.As(&mt))) mt->SetMultithreadProtected(TRUE);
@@ -1550,8 +1558,8 @@ static int runStream(StreamOpts o) {
                 h264Bytes += len;
                 if (!writePacket(3, pk.data(), (uint32_t)pk.size())) running = false;
             };
-            char cfg[300];
-            snprintf(cfg, sizeof cfg, "{\"codec\":\"h264\",\"w\":%u,\"h\":%u,\"fps\":%d,\"encoder\":\"%s\"}", OW, OH, o.fps, jsonEscape(enc.name).c_str());
+            char cfg[600];
+            snprintf(cfg, sizeof cfg, "{\"codec\":\"h264\",\"w\":%u,\"h\":%u,\"fps\":%d,\"encoder\":\"%s\",\"gpu\":\"%s\"}", OW, OH, o.fps, jsonEscape(enc.name).c_str(), jsonEscape(g.adapterName).c_str());
             writePacket(4, (const BYTE*)cfg, (uint32_t)strlen(cfg));
             if (enc.async) pumpThread = std::thread([&] { winrt::init_apartment(winrt::apartment_type::multi_threaded); enc.pump(running); });
             fprintf(stderr, "h264: placa de video %s, codificador %s, %ux%u %d fps %u bps async=%d entrada=%s\n", g.adapterName.c_str(), enc.name.c_str(), OW, OH, o.fps, o.bitrate, (int)enc.async, enc.memMode ? "memoria" : "textura");
@@ -1703,6 +1711,13 @@ static int runStream(StreamOpts o) {
     if (follow) cursorOn = isTargetFocused(o.hwnd);
     try { session.IsCursorCaptureEnabled(cursorOn); } catch (...) {}
     try { session.IsBorderRequired(false); } catch (...) {}
+    // Windows 11 24H2+: intervalo minimo entre quadros capturados. O padrao (16 ms) prendia a captura em 48 quadros/s
+    // num monitor de 144 Hz. 60% do tempo de um quadro da live: sempre chega quadro novo, sem converter quadros sobrando
+    try {
+        auto antes = session.MinUpdateInterval().count();
+        session.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ (int64_t)envNum("GLV_MINUPD_US", 600000 / std::max(1, o.fps)) * 10 });
+        fprintf(stderr, "intervalo minimo da captura: %.2f ms -> %.2f ms\n", antes / 1e4, session.MinUpdateInterval().count() / 1e4);
+    } catch (...) { fprintf(stderr, "intervalo minimo da captura: nao suportado neste Windows\n"); }
 
     // exit when the parent closes our stdin
     std::thread watchStdin([&] {

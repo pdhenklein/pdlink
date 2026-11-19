@@ -114,7 +114,7 @@ class LiveController {
     private onH264Config(json: string) {
         let raw: any;
         try { raw = JSON.parse(json); } catch { return; }
-        const cfg: VideoConfig = { codec: h264CodecFor(raw.w, raw.h, raw.fps), w: raw.w, h: raw.h, fps: raw.fps };
+        const cfg: VideoConfig = { codec: h264CodecFor(raw.w, raw.h, raw.fps), w: raw.w, h: raw.h, fps: raw.fps, encoder: raw.encoder ?? "", gpu: raw.gpu ?? "" };
         this.videoMode = "h264";
         this.videoConfig = cfg;
         this.encoderName = raw.encoder ?? "";

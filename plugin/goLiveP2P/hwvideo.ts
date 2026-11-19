@@ -7,6 +7,9 @@ export interface VideoConfig {
     w: number;
     h: number;
     fps: number;
+    /** so informativo (diagnostico de quem assiste): codificador e placa de video de quem transmite */
+    encoder?: string;
+    gpu?: string;
 }
 
 const SLICE = 60000; // abaixo do limite de mensagem do SCTP

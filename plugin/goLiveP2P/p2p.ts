@@ -753,7 +753,10 @@ export class Hub {
                 if (typeof ev.data === "string") {
                     try {
                         const o = JSON.parse(ev.data);
-                        if (o.t === "cfg") dec.configure(o).then(() => dec.onNeedKey()).catch(() => { });
+                        if (o.t === "cfg") {
+                            plog(`assistir: video da live ${o.w}x${o.h} ${o.fps} fps; quem transmite usa ${o.gpu || "placa desconhecida (versao antiga)"}, codificador ${o.encoder || "?"}`);
+                            dec.configure(o).then(() => dec.onNeedKey()).catch(() => { });
+                        }
                     } catch { }
                 } else recv.push(ev.data);
             };
