@@ -5,6 +5,7 @@ import { pickSink } from "./audioSink";
 import { plog } from "./logger";
 import { getLive } from "./live";
 import { MarkLayer } from "./marks";
+import { settings } from "./settings";
 
 // Faz o Discord "enxergar" as lives (a nossa e as dos amigos que usam o plugin) como transmissoes
 // dele, so localmente: as lojas devolvem a transmissao e o Discord desenha sozinho o quadro na grade,
@@ -118,26 +119,133 @@ interface VolumeStore {
     isLocalMute(userId: string, ctx: string): boolean;
     getOutputDeviceId?(): string;
     getOutputDevices?(): Record<string, { id?: string; name?: string; }>;
+    getSidechainCompression?(): boolean;
+    getSidechainCompressionStrength?(): number;
 }
 
-/** Toca a live na saida de som escolhida nas configuracoes de voz do Discord (e nao so na padrao do Windows). */
-async function applyOutputDevice(v: HTMLMediaElement & { setSinkId?: (id: string) => Promise<void>; sinkId?: string; }, media: VolumeStore) {
-    if (typeof v.setSinkId !== "function") return;
+type SinkTarget = { setSinkId?: (id: string) => Promise<void>; sinkId?: string; };
+
+/**
+ * Toca a live na saida de som escolhida nas configuracoes de voz do Discord, como o Go Live dele.
+ * Com a opcao "saida padrao do Windows" (menu da live), vai para a padrao: quem usa VoiceMeeter deixa a voz e a live em canais separados.
+ */
+async function applyOutputDevice(target: SinkTarget, media: VolumeStore) {
+    if (typeof target.setSinkId !== "function") return;
     try {
         const list = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === "audiooutput");
-        const want = pickSink(media.getOutputDeviceId?.(), media.getOutputDevices?.(), list);
-        if ((v.sinkId ?? "") !== want) await v.setSinkId(want);
+        const want = settings.store.liveOutputDefault ? "" : pickSink(media.getOutputDeviceId?.(), media.getOutputDevices?.(), list);
+        if ((target.sinkId ?? "") !== want) await target.setSinkId(want);
     } catch { }
 }
 
-/** Aplica ao <video> o volume e o "silenciar" que o usuario escolheu nos controles nativos da transmissao. */
-export function applyLocalAudio(v: { volume: number; muted: boolean; }, media: VolumeStore, userId: string) {
+/** Volume que o usuario escolheu nos controles nativos da transmissao (1 = 100%, o Discord vai ate 2 = 200%); 0 se silenciou. */
+export function streamGain(media: VolumeStore, userId: string) {
+    if (media.isLocalMute(userId, "stream")) return 0;
     // sem ajuste feito, o Discord devolve o volume padrao dele para transmissoes (bem baixo); aqui conta como 100%
     const def = media.getLocalVolume("0", "stream");
     const cur = media.getLocalVolume(userId, "stream");
     const pct = cur === def ? 100 : cur;
-    v.volume = Math.max(0, Math.min(1, pct / 100));
-    v.muted = !!media.isLocalMute(userId, "stream");
+    return Math.max(0, Math.min(4, pct / 100));
+}
+
+// O volume de um <video> para em 100%, mas o slider do Discord vai ate 200%. Entao o som da live passa por um ganho
+// do Web Audio (que passa de 100%) e o <video> fica mudo, so com a imagem.
+const canBoost = typeof AudioContext !== "undefined" && typeof (AudioContext.prototype as any).setSinkId === "function";
+interface AudioPipe { ctx: AudioContext; gain: GainNode; duck: GainNode; target?: number; src?: MediaStreamAudioSourceNode; trackId?: string; }
+const audioPipes = new Map<HTMLVideoElement, AudioPipe>();
+
+// "Atenuacao da transmissao" do Discord: enquanto alguem da call fala, o som da live abaixa para a voz aparecer.
+// O Discord faz isso no motor de voz dele, que nao toca a nossa live; aqui e o mesmo efeito, com as mesmas opcoes do menu.
+let speaking: any = null;
+let duckEnabled = true;
+let duckStrength = 50;
+
+function updateDucking() {
+    const talking = duckEnabled && !!speaking?.isAnyoneElseSpeaking?.();
+    // forca 0..100 do menu: 50 (padrao) deixa a live em ~55% enquanto alguem fala, 100 em 10%
+    const low = 1 - 0.9 * Math.max(0, Math.min(100, duckStrength)) / 100;
+    for (const p of audioPipes.values()) {
+        const target = talking ? low : 1;
+        if (p.target === target) continue;
+        p.target = target;
+        const g = p.duck.gain;
+        const now = p.ctx.currentTime;
+        g.cancelScheduledValues(now);
+        g.setValueAtTime(g.value, now);
+        // abaixa rapido quando a voz comeca; volta devagar, um pouco depois da voz parar
+        if (talking) g.setTargetAtTime(target, now, 0.04);
+        else g.setTargetAtTime(1, now + 0.3, 0.25);
+    }
+}
+
+function watchSpeaking() {
+    if (speaking) return;
+    speaking = findStore("SpeakingStore");
+    speaking?.addChangeListener?.(updateDucking);
+}
+
+function unwatchSpeaking() {
+    speaking?.removeChangeListener?.(updateDucking);
+    speaking = null;
+}
+
+function audioPipe(v: HTMLVideoElement) {
+    let p = audioPipes.get(v);
+    if (!p) {
+        const ctx = new AudioContext();
+        const gain = ctx.createGain();
+        const duck = ctx.createGain();
+        gain.connect(duck);
+        duck.connect(ctx.destination);
+        p = { ctx, gain, duck };
+        audioPipes.set(v, p);
+        watchSpeaking();
+    }
+    // a trilha de audio pode chegar depois do video, ou trocar se a conexao for refeita
+    const track = (v.srcObject as MediaStream | null)?.getAudioTracks()[0];
+    if (track?.id !== p.trackId) {
+        p.src?.disconnect();
+        p.src = track ? p.ctx.createMediaStreamSource(new MediaStream([track])) : undefined;
+        p.src?.connect(p.gain);
+        p.trackId = track?.id;
+    }
+    if (p.ctx.state === "suspended") p.ctx.resume().catch(() => { });
+    return p;
+}
+
+function closeAudioPipe(v: HTMLVideoElement) {
+    const p = audioPipes.get(v);
+    if (!p) return;
+    audioPipes.delete(v);
+    p.src?.disconnect();
+    p.ctx.close().catch(() => { });
+    if (!audioPipes.size) unwatchSpeaking();
+}
+
+/** Aplica ao som da live o volume, o "silenciar" e a saida de som escolhidos no Discord. */
+function applyRemoteAudio(v: HTMLVideoElement, media: VolumeStore, userId: string) {
+    const level = streamGain(media, userId);
+    if (!canBoost) {
+        v.volume = Math.min(1, level);
+        v.muted = level === 0;
+        applyOutputDevice(v as any, media);
+        return;
+    }
+    v.muted = true;
+    const p = audioPipe(v);
+    p.gain.gain.value = level;
+    duckEnabled = media.getSidechainCompression?.() ?? true;
+    duckStrength = media.getSidechainCompressionStrength?.() ?? 50;
+    updateDucking();
+    applyOutputDevice(p.ctx as any, media);
+}
+
+/** Reaplica a saida de som nas lives abertas (chamado quando a opcao do menu muda). */
+export function refreshLiveOutput() {
+    const media = stores.MediaEngineStore;
+    if (!media) return;
+    for (const p of audioPipes.values()) applyOutputDevice(p.ctx as any, media);
+    for (const k of keptVideos.values()) if (!canBoost) applyOutputDevice(k.v as any, media);
 }
 
 // Ao ir para tela cheia (ou trocar o layout), o Discord desmonta o quadro da live e monta outro. Um <video> novo comeca vazio
@@ -160,11 +268,12 @@ function takeVideo(streamId: string) {
 function releaseVideo(streamId: string, v: HTMLVideoElement, kept: boolean) {
     v.remove();
     const k = keptVideos.get(streamId);
-    if (!kept || k?.v !== v) { v.srcObject = null; return; }
+    if (!kept || k?.v !== v) { v.srcObject = null; closeAudioPipe(v); return; }
     k.busy = false;
     k.drop = setTimeout(() => {
         if (k.busy) return;
         v.srcObject = null;
+        closeAudioPipe(v);
         keptVideos.delete(streamId);
     }, 5000);
 }
@@ -193,14 +302,19 @@ function P2PVideo(props: any) {
         if (!v || !media || streamId === LOCAL_VIDEO_ID) return;
         const uid = String(streamId).slice(REMOTE_PREFIX.length);
         const apply = () => {
-            try { applyLocalAudio(v, media, uid); } catch { }
-            applyOutputDevice(v as any, media);
+            try { applyRemoteAudio(v, media, uid); } catch { }
         };
         apply();
         media.addChangeListener(apply);
+        // o fluxo e ligado ao <video> depois deste efeito: refaz quando ele carrega
+        v.addEventListener("loadedmetadata", apply);
         // trocar ou ligar/desligar um dispositivo de som no Windows tambem muda a lista
         navigator.mediaDevices?.addEventListener?.("devicechange", apply);
-        return () => { media.removeChangeListener(apply); navigator.mediaDevices?.removeEventListener?.("devicechange", apply); };
+        return () => {
+            media.removeChangeListener(apply);
+            v.removeEventListener("loadedmetadata", apply);
+            navigator.mediaDevices?.removeEventListener?.("devicechange", apply);
+        };
     }, [streamId]);
     useEffect(() => {
         const v = ref.current;

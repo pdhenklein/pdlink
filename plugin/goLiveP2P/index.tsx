@@ -1,8 +1,9 @@
 import { CogWheel } from "@components/Icons";
 import { copyWithToast } from "@utils/discord";
 import { ModalRoot, ModalSize, openModal } from "@utils/modal";
+import { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import definePlugin, { PluginNative } from "@utils/types";
-import { ContextMenuApi, Menu, ScrollerThin, SelectedChannelStore, useEffect, useRef, useState } from "@webpack/common";
+import { ContextMenuApi, Menu, ScrollerThin, SelectedChannelStore, UserStore, useEffect, useRef, useState } from "@webpack/common";
 
 import { FilesButton } from "./files";
 import { MusicButton } from "./music";
@@ -10,7 +11,7 @@ import { showUpdateBanner } from "./updateBanner";
 import { getWatchUrl, startManager, stopManager } from "./manager";
 import { Settings } from "@api/Settings";
 import { settings } from "./settings";
-import { getLiveEntry } from "./nativeUi";
+import { getLiveEntry, refreshLiveOutput } from "./nativeUi";
 import { CursorMode, getLive, listCameras, LiveSource, PRESETS, Preset, sourcesApi } from "./live";
 
 const Native = VencordNative.pluginHelpers.pdLink as PluginNative<typeof import("./native")>;
@@ -363,6 +364,25 @@ function LiveModal({ modalProps }: { modalProps: any; }) {
     );
 }
 
+// Menu da live de outra pessoa (botao direito no quadro): escolher onde o som dela toca
+const streamContext: NavContextMenuPatchCallback = (children, { stream }: { stream?: { ownerId?: string; }; }) => {
+    const owner = stream?.ownerId;
+    if (!owner || owner === UserStore.getCurrentUser()?.id || !getLiveEntry(owner)) return;
+    children.push(
+        <Menu.MenuSeparator />,
+        <Menu.MenuCheckboxItem
+            id="pdlink-live-output-default"
+            label="Som da live na saída padrão do Windows"
+            checked={settings.store.liveOutputDefault}
+            action={() => {
+                settings.store.liveOutputDefault = !settings.store.liveOutputDefault;
+                refreshLiveOutput();
+                ContextMenuApi.closeContextMenu();
+            }}
+        />
+    );
+};
+
 // Aviso "AO VIVO" sempre visivel enquanto a live esta ativa (sera substituido pelo HUD nativo na proxima etapa)
 let pill: HTMLDivElement | null = null;
 let unsub: (() => void) | null = null;
@@ -401,6 +421,7 @@ export default definePlugin({
     authors: [{ name: "local", id: 0n }],
     settings,
     enabledByDefault: true,
+    contextMenus: { "stream-context": streamContext },
 
     patches: [
         {
