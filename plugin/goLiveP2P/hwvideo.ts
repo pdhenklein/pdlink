@@ -645,7 +645,7 @@ class FilterGl {
 export class LatestFramePainter {
     // fila com horario de exibicao: cada quadro novo sai no ritmo em que o jogo o mostrou, nao no ritmo em que a rede entregou
     private pending: { f: VideoFrame; due: number; }[] = [];
-    private queue: VideoFrame[] = [];
+    private queue: { f: VideoFrame; due: number; }[] = [];
     private lastTs = -1;
     private seg: { ts: number; start: number; end: number; steps: number; } | null = null;
     private lastStep = -1;
@@ -654,7 +654,8 @@ export class LatestFramePainter {
     private stopped = false;
     // atraso (chegada - horario do quadro) dos ultimos quadros: o menor e a base, a variacao vira a folga do buffer
     private lags: number[] = [];
-    private base = 0;
+    /** horario do quadro + offset = quando ele aparece. Sobe na hora quando precisa, desce devagar (sem saltos de velocidade) */
+    private offset = NaN;
     private lastArrival = 0;
     painted = 0;
     /** quadros com conteudo novo (repetidos do transmissor descartados) */
@@ -674,10 +675,11 @@ export class LatestFramePainter {
     constructor(private canvas: HTMLCanvasElement) {
         // com WebGL o quadro passa pelo filtro de limpeza e nitidez; sem WebGL, desenho simples
         try {
-            const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: false, desynchronized: true, preserveDrawingBuffer: true });
+            // sem "desynchronized": nesse modo o video podia copiar o canvas no meio de um desenho (imagem rasgada)
+            const gl = canvas.getContext("webgl2", { alpha: false, antialias: false, depth: false, preserveDrawingBuffer: true });
             if (gl) { this.gl = new FilterGl(gl); this.filtered = true; }
         } catch { }
-        if (!this.gl) this.ctx = canvas.getContext("2d", { alpha: false, desynchronized: true })!;
+        if (!this.gl) this.ctx = canvas.getContext("2d", { alpha: false })!;
         this.loop = this.loop.bind(this);
         this.raf = requestAnimationFrame(this.loop);
     }
@@ -694,6 +696,7 @@ export class LatestFramePainter {
         if (frame.timestamp < this.lastTs) {
             // live reiniciou (horario voltou): recomeca a medida
             this.lags = [];
+            this.offset = NaN;
             this.pending.forEach(p => p.f.close());
             this.pending = [];
         }
@@ -702,15 +705,18 @@ export class LatestFramePainter {
         const now = performance.now();
         if (this.lastArrival) this.maxGap = Math.max(this.maxGap, now - this.lastArrival);
         this.lastArrival = now;
-        this.lags.push(now - frame.timestamp / 1000);
+        const lag = now - frame.timestamp / 1000;
+        this.lags.push(lag);
         if (this.lags.length > 180) this.lags.shift();
-        const sorted = [...this.lags].sort((a, b) => a - b);
-        this.base = sorted[0];
-        // folga = maior variacao recente das chegadas + 3 ms, no maximo 60 ms
-        this.delay = Math.min(60, sorted[sorted.length - 1] - this.base + 3);
-        // no comeco ainda nao se conhece a rede: comeca com 20 ms para nao precisar crescer aos trancos
-        if (this.lags.length < 60) this.delay = Math.max(this.delay, 20);
-        this.pending.push({ f: frame, due: frame.timestamp / 1000 + this.base + this.delay });
+        let lo = Infinity, hi = -Infinity;
+        for (const l of this.lags) { if (l < lo) lo = l; if (l > hi) hi = l; }
+        // alvo: o quadro que mais atrasou recentemente ainda chega a tempo (+3 ms); folga de no maximo 60 ms
+        let target = Math.min(hi, lo + 60) + 3;
+        if (this.lags.length < 60) target = Math.max(target, lo + 20); // comeco: a rede ainda nao e conhecida
+        if (!Number.isFinite(this.offset) || target > this.offset) this.offset = target;
+        else this.offset = Math.max(target, this.offset - 0.05); // desce no maximo 3 ms por segundo: ninguem percebe
+        this.delay = this.offset - lo;
+        this.pending.push({ f: frame, due: frame.timestamp / 1000 + this.offset });
         while (this.pending.length > 8) this.pending.shift()!.f.close();
     }
 
@@ -723,8 +729,8 @@ export class LatestFramePainter {
 
     /** quadros cuja hora de exibicao ja chegou (com 4 ms de antecedencia, para cair na pintura certa) */
     private takeReady(now: number) {
-        const out: VideoFrame[] = [];
-        while (this.pending.length && this.pending[0].due <= now + 4) out.push(this.pending.shift()!.f);
+        const out: { f: VideoFrame; due: number; }[] = [];
+        while (this.pending.length && this.pending[0].due <= now + 4) out.push(this.pending.shift()!);
         return out;
     }
 
@@ -737,12 +743,12 @@ export class LatestFramePainter {
             this.fgStep(now);
         } else {
             // sem geracao: um quadro por pintura, na ordem; se mais de 2 deram a hora juntos (rede travou), pula os mais velhos
-            this.queue.forEach(q => q.close());
+            this.queue.forEach(q => q.f.close());
             this.queue = [];
             this.seg = null;
-            while (ready.length > 2) { ready.shift()!.close(); this.late++; }
-            const f = ready.shift();
-            if (ready.length) this.pending.unshift({ f: ready[0], due: now });
+            while (ready.length > 2) { ready.shift()!.f.close(); this.late++; }
+            const f = ready.shift()?.f;
+            if (ready.length) this.pending.unshift(ready[0]);
             if (f) {
                 this.fit(f.displayWidth, f.displayHeight);
                 if (this.gl) this.gl.draw(f, f.displayWidth, f.displayHeight);
@@ -759,17 +765,17 @@ export class LatestFramePainter {
         const gl = this.gl!;
         const seg = this.seg;
         // o proximo trecho comeca quando o atual termina; so se acumularem 3 (rede travou) pula para o mais novo
-        if (this.queue.length && (!seg || now >= seg.end || this.queue.length >= 3)) {
-            if (seg && now < seg.end) while (this.queue.length > 1) { this.queue.shift()!.close(); this.late++; }
-            const f = this.queue.shift()!;
+        if (this.queue.length && (!seg || now >= seg.end - 1 || this.queue.length >= 3)) {
+            if (seg && now < seg.end - 1) while (this.queue.length > 1) { this.queue.shift()!.f.close(); this.late++; }
+            const { f, due } = this.queue.shift()!;
             const w = f.displayWidth, h = f.displayHeight;
             this.fit(w, h);
             // intervalo real entre os dois quadros do jogo; parado por muito tempo (menu, tela estatica) = sem quadros do meio
             const d = seg ? (f.timestamp - seg.ts) / 1000 : 0;
             const ok = gl.fgPush(f, w, h, d > 0 && d <= 150);
-            // ja tem outro quadro esperando = a imagem esta mais atrasada que o normal: este trecho passa um pouco mais rapido
-            const dur = ok ? d * (this.queue.length ? 0.8 : 1) : 0;
-            this.seg = { ts: f.timestamp, start: now, end: now + dur, steps: ok ? Math.round(viewFg.mult) : 1 };
+            // o trecho vai do horario deste quadro ate o do proximo: velocidade sempre igual a do jogo
+            const start = Math.min(now, Math.max(due, now - d));
+            this.seg = { ts: f.timestamp, start, end: start + (ok ? d : 0), steps: ok ? Math.round(viewFg.mult) : 1 };
             this.lastStep = -1;
             this.fgReal++;
             this.dirty = true;
@@ -795,7 +801,7 @@ export class LatestFramePainter {
         cancelAnimationFrame(this.raf);
         this.pending.forEach(p => p.f.close());
         this.pending = [];
-        this.queue.forEach(q => q.close());
+        this.queue.forEach(q => q.f.close());
         this.queue = [];
     }
 }
