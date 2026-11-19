@@ -1530,6 +1530,11 @@ static int runStream(StreamOpts o) {
     bool gpuMode = false;
     std::atomic<uint64_t> h264Bytes{ 0 };
     LONGLONG firstTs = -1;
+    // horario real (do jogo) do quadro que cada envio do relogio fixo carrega; repetido = mesmo horario.
+    // Quem assiste usa isso para saber quais quadros sao novos e o intervalo real entre eles (geracao de quadros).
+    std::atomic<LONGLONG> lastContentTs{ -1 };
+    std::atomic<LONGLONG> contentTs[64];
+    for (auto& c : contentTs) c = -1;
     if (o.h264) {
         std::string err;
         if (conv.init(g, W, H, OW, OH, (UINT)o.fps, err) && enc.init(g, OW, OH, (UINT)o.fps, o.bitrate, err)) {
@@ -1537,7 +1542,9 @@ static int runStream(StreamOpts o) {
             enc.onOutput = [&](bool key, LONGLONG ts, const BYTE* p, DWORD len) {
                 std::vector<BYTE> pk(9 + (size_t)len);
                 pk[0] = key ? 1 : 0;
-                double tsUs = ts / 10.0;
+                const LONGLONG per = 10000000LL / std::max(1, o.fps);
+                LONGLONG ct = contentTs[(uint64_t)((ts + per / 2) / per) % 64];
+                double tsUs = (ct >= 0 ? ct : ts) / 10.0;
                 memcpy(pk.data() + 1, &tsUs, 8);
                 memcpy(pk.data() + 9, p, len);
                 h264Bytes += len;
@@ -1633,6 +1640,7 @@ static int runStream(StreamOpts o) {
                             if (!lastFrameTex) { D3D11_TEXTURE2D_DESC ld{}; mnv->GetDesc(&ld); g.dev->CreateTexture2D(&ld, nullptr, &lastFrameTex); }
                             if (lastFrameTex) { g.ctx->CopyResource(lastFrameTex.Get(), mnv); lastNv12 = lastFrameTex.Get(); }
                             lastEmit = nowSec();
+                            lastContentTs = mts - firstTs;
                             capFrames++;
                             fprintf(stderr, "quadro aproveitado apos mudar o tamanho\n");
                         }
@@ -1655,6 +1663,7 @@ static int runStream(StreamOpts o) {
             if (nv12) {
                 if (!lastFrameTex) { D3D11_TEXTURE2D_DESC ld{}; nv12->GetDesc(&ld); g.dev->CreateTexture2D(&ld, nullptr, &lastFrameTex); }
                 if (lastFrameTex) { g.ctx->CopyResource(lastFrameTex.Get(), nv12); lastNv12 = lastFrameTex.Get(); }
+                lastContentTs = ts - firstTs;
                 capFrames++;
             }
             return;
@@ -1803,6 +1812,7 @@ static int runStream(StreamOpts o) {
                         if (!slot) { D3D11_TEXTURE2D_DESC d{}; lastNv12->GetDesc(&d); g.dev->CreateTexture2D(&d, nullptr, &slot); }
                         if (slot) {
                             g.ctx->CopyResource(slot.Get(), lastNv12);
+                            contentTs[n % 64] = lastContentTs.load();
                             enc.submit(slot.Get(), (LONGLONG)n * period);
                         }
                     }

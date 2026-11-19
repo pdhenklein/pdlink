@@ -787,7 +787,7 @@ export class Hub {
             caps: { marks: false },
             sendMark: m => { if (mdc.readyState === "open") { try { mdc.send(JSON.stringify(m)); } catch { } } },
             stream, info, mode,
-            stats: () => ({ mode, decoded: dec.decoded, painted: painter.painted, hardwareDecode: dec.hardware, erro: dec.error, bytes: recv.bytes }),
+            stats: () => ({ mode, decoded: dec.decoded, painted: painter.painted, fgReais: painter.fgReal, fgCriados: painter.fgMade, hardwareDecode: dec.hardware, erro: dec.error, bytes: recv.bytes }),
             close: () => {
                 stopResend();
                 plog(`assistir: saiu da live (${id})`);

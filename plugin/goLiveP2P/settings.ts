@@ -19,5 +19,6 @@ export const settings = definePluginSettings({
     marksInCapture: { type: OptionType.BOOLEAN, description: "Ping e desenho aparecem em prints e gravacoes", default: false, hidden: true },
     allowMarks: { type: OptionType.BOOLEAN, description: "Aceitar ping e desenho dos espectadores", default: true, hidden: true },
     viewFilter: { type: OptionType.STRING, description: "Limpeza e nitidez das lives que eu assisto (off, low, mid, high)", default: "mid", hidden: true },
+    viewFg: { type: OptionType.NUMBER, description: "Geracao de quadros nas lives que eu assisto (1 = desligada, 2, 3 ou 4x)", default: 1, hidden: true },
     liveOutputDefault: { type: OptionType.BOOLEAN, description: "Som das lives na saida padrao do Windows (e nao na do Discord)", default: false, hidden: true }
 });

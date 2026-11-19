@@ -12,7 +12,7 @@ import { getWatchUrl, startManager, stopManager } from "./manager";
 import { Settings } from "@api/Settings";
 import { settings } from "./settings";
 import { getLiveEntry, refreshLiveOutput } from "./nativeUi";
-import { viewFilter } from "./hwvideo";
+import { viewFg, viewFilter } from "./hwvideo";
 import { CursorMode, getLive, listCameras, LiveSource, PRESETS, Preset, sourcesApi } from "./live";
 
 const Native = VencordNative.pluginHelpers.pdLink as PluginNative<typeof import("./native")>;
@@ -367,17 +367,26 @@ function LiveModal({ modalProps }: { modalProps: any; }) {
 
 // Limpeza (filtro que preserva bordas) e nitidez (CAS) aplicadas na placa de video em cada quadro das lives que eu assisto
 const VIEW_FILTERS = [
-    { id: "off", label: "Desligada (imagem original)", clean: 0, sharp: 0 },
-    { id: "low", label: "Leve", clean: 0.4, sharp: 0.3 },
-    { id: "mid", label: "Média", clean: 0.6, sharp: 0.6 },
-    { id: "high", label: "Forte", clean: 0.8, sharp: 0.9 }
+    { id: "off", label: "Desligada (imagem original)", clean: 0, sharp: 0, amount: 0 },
+    { id: "low", label: "Leve", clean: 0.3, sharp: 0.6, amount: 1.5 },
+    { id: "mid", label: "Média", clean: 0.5, sharp: 1, amount: 2.5 },
+    { id: "high", label: "Forte", clean: 0.6, sharp: 1, amount: 4 }
 ];
 
 function applyViewFilter() {
     const f = VIEW_FILTERS.find(v => v.id === settings.store.viewFilter) ?? VIEW_FILTERS[2];
     viewFilter.clean = f.clean;
     viewFilter.sharp = f.sharp;
+    viewFilter.amount = f.amount;
+    viewFg.mult = [1, 2, 3, 4].includes(settings.store.viewFg) ? settings.store.viewFg : 1;
 }
+
+const FG_MULTS = [
+    { m: 1, label: "Desligada" },
+    { m: 2, label: "2x" },
+    { m: 3, label: "3x" },
+    { m: 4, label: "4x" }
+];
 
 // Menu da live de outra pessoa (botao direito no quadro): onde o som dela toca e o tratamento da imagem
 const streamContext: NavContextMenuPatchCallback = (children, { stream }: { stream?: { ownerId?: string; }; }) => {
@@ -390,7 +399,25 @@ const streamContext: NavContextMenuPatchCallback = (children, { stream }: { stre
                 <Menu.MenuRadioItem
                     key={f.id} group="pdlink-view-filter-g" id={"pdlink-view-" + f.id} label={f.label}
                     checked={settings.store.viewFilter === f.id}
-                    action={() => { settings.store.viewFilter = f.id; applyViewFilter(); }}
+                    action={() => {
+                        settings.store.viewFilter = f.id;
+                        applyViewFilter();
+                        // o menu do Discord so se redesenha quando o mouse sai do item: fecha para nao mostrar a marca antiga
+                        ContextMenuApi.closeContextMenu();
+                    }}
+                />
+            ))}
+        </Menu.MenuItem>,
+        <Menu.MenuItem id="pdlink-view-fg" label="Geração de quadros">
+            {FG_MULTS.map(o => (
+                <Menu.MenuRadioItem
+                    key={o.m} group="pdlink-view-fg-g" id={"pdlink-fg-" + o.m} label={o.label}
+                    checked={(settings.store.viewFg || 1) === o.m}
+                    action={() => {
+                        settings.store.viewFg = o.m;
+                        applyViewFilter();
+                        ContextMenuApi.closeContextMenu();
+                    }}
                 />
             ))}
         </Menu.MenuItem>,
