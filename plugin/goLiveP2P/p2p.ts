@@ -1,4 +1,4 @@
-import { FrameReceiver, HwDecoder, HwEncoder, LatestFramePainter, sendFrame } from "./hwvideo";
+import { FrameReceiver, HwDecoder, HwEncoder, LatestFramePainter, sendFrame, viewFg } from "./hwvideo";
 import { FileEngine, FileOffer, sanitizeOffer } from "./fileXfer";
 import { Mark, sanitizeMark } from "./marksCore";
 import { plog, since } from "./logger";
@@ -8,8 +8,36 @@ import { MqttClient } from "./mqtt";
 const BROKERS = ["wss://broker.emqx.io:8084/mqtt", "wss://broker.hivemq.com:8884/mqtt"];
 
 export const ICE: RTCConfiguration = {
-    iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }]
+    // varios provedores: se o DNS da pessoa nao achar um, os outros ainda servem
+    iceServers: [
+        { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+        { urls: "stun:stun.cloudflare.com:3478" },
+        { urls: "stun:global.stun.twilio.com:3478" }
+    ]
 };
+
+/** resumo dos caminhos de rede de uma lista de candidatos, sem enderecos (ex.: "host 2, srflx 1, srflx-v6 1") */
+export function candSummary(list: { candidate?: string; }[]) {
+    const n: Record<string, number> = {};
+    for (const c of list) {
+        const m = / typ (\w+)/.exec(c?.candidate ?? "");
+        if (!m) continue;
+        const addr = (c.candidate ?? "").split(" ")[4] ?? "";
+        const k = m[1] + (addr.includes(":") ? "-v6" : "") + ((c.candidate ?? "").includes(" tcp ") ? "-tcp" : "");
+        n[k] = (n[k] ?? 0) + 1;
+    }
+    return Object.entries(n).map(([k, v]) => `${k} ${v}`).join(", ") || "nenhum";
+}
+
+/** por que a conexao nao abriu: estado dos pares testados */
+export async function pairSummary(pc: RTCPeerConnection) {
+    try {
+        const st = await pc.getStats();
+        const n: Record<string, number> = {};
+        st.forEach((r: any) => { if (r.type === "candidate-pair") n[r.state] = (n[r.state] ?? 0) + 1; });
+        return Object.entries(n).map(([k, v]) => `${k} ${v}`).join(", ") || "nenhum par";
+    } catch { return "sem dados"; }
+}
 
 const MAX_VIEWERS = 4;
 
@@ -708,6 +736,17 @@ export class Hub {
             dc.binaryType = "arraybuffer";
             painter.onPaint = () => vtrack?.requestFrame?.();
             dec.onFrame = f => painter.push(f);
+            // a cada 5 s, como a live esta chegando (para achar travadinhas): quadros novos/s, maior buraco, folga do buffer
+            let last = { t: performance.now(), dec: 0, fresh: 0, painted: 0, bytes: 0, late: 0 };
+            const statTimer = setInterval(() => {
+                if (pc.connectionState === "closed") { clearInterval(statTimer); return; }
+                const t = performance.now(), dt = (t - last.t) / 1000;
+                if (dec.decoded === last.dec) return;
+                const r = (v: number, o: number) => ((v - o) / dt).toFixed(1);
+                plog(`assistir: ritmo ${r(dec.decoded, last.dec)} decodificados/s, ${r(painter.fresh, last.fresh)} novos/s, ${r(painter.painted, last.painted)} pintados/s, ${((recv.bytes - last.bytes) * 8 / dt / 1e6).toFixed(1)} Mbps, maior buraco ${painter.maxGap.toFixed(0)} ms, folga ${painter.delay.toFixed(0)} ms, pulados ${painter.late - last.late}, FG ${viewFg.mult}x (cortes ${painter.fgSkipped})`);
+                painter.maxGap = 0;
+                last = { t, dec: dec.decoded, fresh: painter.fresh, painted: painter.painted, bytes: recv.bytes, late: painter.late };
+            }, 5000);
             dec.onNeedKey = () => { try { dc.send(JSON.stringify({ t: "key" })); } catch { } };
             recv.onFrame = (key, ts, data) => dec.push(key, ts, data);
             dc.onmessage = ev => {
@@ -769,11 +808,11 @@ export class Hub {
                     vtrack = vcanvas.captureStream(0).getVideoTracks()[0] as any;
                     stream.addTrack(vtrack!);
                 } else mode = "rtp";
-                plog(`assistir: resposta recebida (modo ${mode}, ${since(t0)}, pedido repetido ${tries}x)`);
+                plog(`assistir: resposta recebida (modo ${mode}, ${since(t0)}, pedido repetido ${tries}x); caminhos dele: ${candSummary(Array.isArray(m.cands) ? m.cands : [])}; meus: ${candSummary(cands)}`);
                 await pc.setRemoteDescription({ type: "answer", sdp: m.sdp });
                 for (const c of Array.isArray(m.cands) ? m.cands : []) pc.addIceCandidate(c).catch(() => { });
                 // se a conexao nao abrir em 15 s depois da resposta, para de insistir e deixa registrado
-                setTimeout(() => { if (pc.connectionState !== "connected" && pc.signalingState !== "closed") { plog(`assistir: conexao nao abriu (${pc.connectionState}, ${since(t0)})`); stopResend(); } }, 15000);
+                setTimeout(() => { if (pc.connectionState !== "connected" && pc.signalingState !== "closed") { pairSummary(pc).then(ps => plog(`assistir: conexao nao abriu (${pc.connectionState}, ${since(t0)}); meus caminhos: ${candSummary(cands)}; pares: ${ps}`)); stopResend(); } }, 15000);
                 resolve(m.info as LiveInfo);
             };
             pc.createOffer().then(async offer => {

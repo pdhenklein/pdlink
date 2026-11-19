@@ -307,16 +307,16 @@ export const viewFg = { mult: 1 };
 const FS_FLOW = `#version 300 es
 precision highp float;
 uniform sampler2D A; uniform sampler2D B; uniform sampler2D P;
-uniform float lod; uniform vec2 px; uniform vec2 size; uniform int R; uniform bool hasP;
+uniform float lod; uniform vec2 px; uniform vec2 size; uniform int R; uniform int K; uniform bool hasP;
 out vec4 o;
 float L(sampler2D t, vec2 q) { return dot(textureLod(t, q, lod).rgb, vec3(0.299, 0.587, 0.114)); }
 float cost(vec2 uv, vec2 v) {
     float c = 0.0;
-    for (int y = -2; y <= 2; y++) for (int x = -2; x <= 2; x++) {
+    for (int y = -K; y <= K; y++) for (int x = -K; x <= K; x++) {
         vec2 q = uv + vec2(x, y) * px;
         c += abs(L(A, q - 0.5 * v) - L(B, q + 0.5 * v));
     }
-    return c;
+    return c / float((2 * K + 1) * (2 * K + 1)) * 25.0;
 }
 void main() {
     vec2 uv = gl_FragCoord.xy / size;
@@ -328,6 +328,9 @@ void main() {
         float c = cost(uv, v) + 0.03 * length(vec2(x, y));
         if (c < bc) { bc = c; best = v; }
     }
+    // parado sempre e candidato (HUD, arma e mira nao andam com a camera), com uma leve preferencia
+    float c0 = cost(uv, vec2(0.0)) * 0.97;
+    if (c0 <= bc) { bc = c0; best = vec2(0.0); }
     o = vec4(best, bc, 1.0);
 }`;
 
@@ -342,14 +345,17 @@ void main() {
     vec2 uv = gl_FragCoord.xy / size;
     ivec2 at = ivec2(gl_FragCoord.xy), lim = textureSize(F, 0) - 1;
     vec2 best = vec2(0.0); float bc = 1e9;
-    for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
-        vec2 v = texelFetch(F, clamp(at + ivec2(i, j), ivec2(0), lim), 0).xy;
+    for (int j = -1; j <= 2; j++) for (int i = -1; i <= 1; i++) {
+        // j == 2 so uma vez: o candidato "parado"
+        if (j == 2 && i != 0) continue;
+        vec2 v = j == 2 ? vec2(0.0) : texelFetch(F, clamp(at + ivec2(i, j), ivec2(0), lim), 0).xy;
         float c = 0.0;
-        for (int y = -2; y <= 2; y++) for (int x = -2; x <= 2; x++) {
+        for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
             vec2 q = uv + vec2(x, y) * px;
             c += abs(L(A, q - 0.5 * v) - L(B, q + 0.5 * v));
         }
-        if (i != 0 || j != 0) c += 0.05;
+        c *= 25.0 / 9.0;
+        if (j == 2) c *= 0.97; else if (i != 0 || j != 0) c += 0.05;
         if (c < bc) { bc = c; best = v; }
     }
     o = vec4(best, bc, 1.0);
@@ -362,15 +368,23 @@ out vec4 o;
 void main() {
     vec2 uv = gl_FragCoord.xy / size;
     vec2 v = texture(F, uv).xy;
-    vec3 ca = textureLod(A, uv - a * v, 0.0).rgb;
-    vec3 cb = textureLod(B, uv + (1.0 - a) * v, 0.0).rgb;
-    // onde os dois nao concordam (algo apareceu ou sumiu), usa so o quadro mais perto no tempo, sem fantasma
-    float w = smoothstep(0.10, 0.30, length(ca - cb));
-    vec3 near = a < 0.5 ? ca : cb;
-    o = vec4(mix(mix(ca, cb, a), near, w), 1.0);
+    vec2 pa = uv - a * v, pb = uv + (1.0 - a) * v;
+    vec3 ca = textureLod(A, pa, 0.0).rgb, cb = textureLod(B, pb, 0.0).rgb;
+    vec3 sa = textureLod(A, uv, 0.0).rgb, sb = textureLod(B, uv, 0.0).rgb;
+    // quanto cada hipotese concorda entre os dois quadros, pixel a pixel (letras do HUD sao finas)
+    float ew = length(ca - cb), es = length(sa - sb);
+    // pixel parado (HUD, arma, mira) concorda melhor sem mover: usa a versao parada
+    float ws = smoothstep(-0.02, 0.02, ew - es);
+    vec3 col = mix(mix(ca, cb, a), mix(sa, sb, a), ws);
+    // nenhuma concorda (algo surgiu ou sumiu): so o lado mais perto no tempo, sem fantasma duplo
+    vec3 near = mix(a < 0.5 ? ca : cb, a < 0.5 ? sa : sb, ws);
+    float bad = smoothstep(0.12, 0.25, min(ew, es));
+    o = vec4(mix(col, near, bad), 1.0);
 }`;
 
-const FG_LEVELS: [number, number][] = [[5, 4], [4, 2], [3, 1], [2, 1]]; // [nivel (1/2^n do tamanho), raio da busca]
+// [nivel (1/2^n do tamanho), raio da busca, raio do bloco comparado]; o ultimo nivel e o do resultado
+const FG_LEVELS: [number, number, number][] = [[5, 4, 2], [4, 2, 2], [3, 1, 2], [2, 1, 1], [1, 1, 1]];
+const FG_OUT = 1;
 
 class FilterGl {
     private gl: WebGL2RenderingContext;
@@ -396,6 +410,14 @@ class FilterGl {
     private pInterp: WebGLProgram | null = null;
     private fgW = 0;
     private fgH = 0;
+    // confianca do par: media do erro de encaixe, lida da placa sem travar (fence + buffer)
+    private pbo: WebGLBuffer | null = null;
+    private fence: WebGLSync | null = null;
+    private conf: "?" | "ok" | "ruim" = "?";
+    lastCost = -1;
+    /** erro medio acima disso = movimento que a busca nao acompanha (flick, troca de cena): mostra so quadros reais */
+    maxCost = 0.02;
+    skipped = 0;
 
     constructor(gl: WebGL2RenderingContext) {
         this.gl = gl;
@@ -477,14 +499,14 @@ class FilterGl {
             // k alto = so diferencas bem pequenas sao suavizadas; clean 1 chega a ~0,06 de diferenca por canal
             gl.bindFramebuffer(gl.FRAMEBUFFER, this.fb);
             gl.useProgram(this.clean);
-            gl.uniform1f(gl.getUniformLocation(this.clean, "k"), 1 / (2 * (0.035 * clean) ** 2));
+            gl.uniform1f(this.loc(this.clean, "k"), 1 / (2 * (0.035 * clean) ** 2));
             gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
             gl.bindTexture(gl.TEXTURE_2D, this.mid);
         }
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.useProgram(this.sharp);
-        gl.uniform1f(gl.getUniformLocation(this.sharp, "s"), Math.max(0, Math.min(1, viewFilter.sharp)));
-        gl.uniform1f(gl.getUniformLocation(this.sharp, "amt"), Math.max(0, Math.min(6, viewFilter.amount)));
+        gl.uniform1f(this.loc(this.sharp, "s"), Math.max(0, Math.min(1, viewFilter.sharp)));
+        gl.uniform1f(this.loc(this.sharp, "amt"), Math.max(0, Math.min(6, viewFilter.amount)));
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
@@ -499,7 +521,7 @@ class FilterGl {
             return t;
         };
         for (const [L] of FG_LEVELS) this.flow.set(L, float(Math.max(1, w >> L), Math.max(1, h >> L), this.flow.get(L)));
-        this.flowFinal = float(Math.max(1, w >> 2), Math.max(1, h >> 2), this.flowFinal);
+        this.flowFinal = float(Math.max(1, w >> FG_OUT), Math.max(1, h >> FG_OUT), this.flowFinal);
         if (this.out) gl.deleteTexture(this.out);
         this.out = this.tex(gl.NEAREST, gl.NEAREST);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
@@ -519,12 +541,21 @@ class FilterGl {
         gl.activeTexture(gl.TEXTURE0);
     }
 
+    // endereco de cada parametro dos shaders, procurado uma vez so (procurar pelo nome a cada quadro custa)
+    private locs = new Map<WebGLProgram, Map<string, WebGLUniformLocation | null>>();
+    private loc(p: WebGLProgram, k: string) {
+        let m = this.locs.get(p);
+        if (!m) this.locs.set(p, m = new Map());
+        if (!m.has(k)) m.set(k, this.gl.getUniformLocation(p, k));
+        return m.get(k)!;
+    }
+
     private uni(p: WebGLProgram, vals: Record<string, number | number[] | boolean>) {
         const { gl } = this;
         for (const [k, v] of Object.entries(vals)) {
-            const loc = gl.getUniformLocation(p, k);
+            const loc = this.loc(p, k);
             if (Array.isArray(v)) gl.uniform2f(loc, v[0], v[1]);
-            else if (typeof v === "boolean" || ["R", "A", "B", "F", "P"].includes(k)) gl.uniform1i(loc, +v);
+            else if (typeof v === "boolean" || ["R", "K", "A", "B", "F", "P"].includes(k)) gl.uniform1i(loc, +v);
             else gl.uniform1f(loc, v);
         }
     }
@@ -545,21 +576,34 @@ class FilterGl {
         if (!can) return false;
         let prev: WebGLTexture | null = null;
         gl.useProgram(this.pFlow);
-        for (const [L, R] of FG_LEVELS) {
+        for (const [L, R, K] of FG_LEVELS) {
             const lw = Math.max(1, w >> L), lh = Math.max(1, h >> L);
             const target = this.flow.get(L)!;
             this.passTo(target, lw, lh);
             this.bindUnits(A, B, prev ?? A);
-            this.uni(this.pFlow!, { A: 0, B: 1, P: 2, lod: L, px: [1 / lw, 1 / lh], size: [lw, lh], R, hasP: !!prev });
+            this.uni(this.pFlow!, { A: 0, B: 1, P: 2, lod: L, px: [1 / lw, 1 / lh], size: [lw, lh], R, K, hasP: !!prev });
             gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
             prev = target;
         }
-        const lw = Math.max(1, w >> 2), lh = Math.max(1, h >> 2);
+        const lw = Math.max(1, w >> FG_OUT), lh = Math.max(1, h >> FG_OUT);
         gl.useProgram(this.pPick);
         this.passTo(this.flowFinal!, lw, lh);
         this.bindUnits(A, B, prev!);
-        this.uni(this.pPick!, { A: 0, B: 1, F: 2, lod: 2, px: [1 / lw, 1 / lh], size: [lw, lh] });
+        this.uni(this.pPick!, { A: 0, B: 1, F: 2, lod: FG_OUT, px: [1 / lw, 1 / lh], size: [lw, lh] });
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        // media do erro de encaixe: reduz o mapa de movimento ate 1x1 e le esse pixel sem esperar a placa
+        gl.bindTexture(gl.TEXTURE_2D, this.flowFinal);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        const top = Math.floor(Math.log2(Math.max(lw, lh)));
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.flowFinal, top);
+        if (!this.pbo) { this.pbo = gl.createBuffer(); gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo); gl.bufferData(gl.PIXEL_PACK_BUFFER, 16, gl.STREAM_READ); }
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, 0);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        if (this.fence) gl.deleteSync(this.fence);
+        this.fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+        gl.flush();
+        this.conf = "?";
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         this.flowOk = true;
         return true;
@@ -569,6 +613,21 @@ class FilterGl {
     fgDraw(a: number) {
         const { gl, w, h } = this;
         if (!this.flowOk || a >= 1) { this.process(this.frames[this.cur]); return; }
+        if (this.conf === "?" && this.fence) {
+            const st = gl.clientWaitSync(this.fence, 0, 0);
+            if (st === gl.ALREADY_SIGNALED || st === gl.CONDITION_SATISFIED) {
+                const v = new Float32Array(4);
+                gl.bindBuffer(gl.PIXEL_PACK_BUFFER, this.pbo);
+                gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, v);
+                gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+                this.lastCost = v[2] / 25;
+                this.conf = Number.isFinite(this.lastCost) && this.lastCost > this.maxCost ? "ruim" : "ok";
+                if (this.conf === "ruim") this.skipped++;
+            }
+        }
+        // ainda sem resposta da placa (dura menos de 1 pintura): repete o quadro anterior; par ruim: so quadros reais
+        if (this.conf === "?") { this.process(this.frames[this.cur ^ 1]); return; }
+        if (this.conf === "ruim") { this.process(this.frames[a < 0.5 ? this.cur ^ 1 : this.cur]); return; }
         const A = this.frames[this.cur ^ 1], B = this.frames[this.cur];
         gl.useProgram(this.pInterp);
         this.passTo(this.out!, w, h);
@@ -581,7 +640,8 @@ class FilterGl {
 }
 
 export class LatestFramePainter {
-    private latest: VideoFrame | null = null;
+    // fila com horario de exibicao: cada quadro novo sai no ritmo em que o jogo o mostrou, nao no ritmo em que a rede entregou
+    private pending: { f: VideoFrame; due: number; }[] = [];
     private queue: VideoFrame[] = [];
     private lastTs = -1;
     private seg: { ts: number; start: number; end: number; steps: number; } | null = null;
@@ -589,7 +649,19 @@ export class LatestFramePainter {
     private dirty = false;
     private raf = 0;
     private stopped = false;
+    // atraso (chegada - horario do quadro) dos ultimos quadros: o menor e a base, a variacao vira a folga do buffer
+    private lags: number[] = [];
+    private base = 0;
+    private lastArrival = 0;
     painted = 0;
+    /** quadros com conteudo novo (repetidos do transmissor descartados) */
+    fresh = 0;
+    /** maior intervalo entre chegadas desde a ultima leitura (ms) */
+    maxGap = 0;
+    /** folga atual do buffer (ms) */
+    delay = 0;
+    /** quadros que chegaram tarde demais e foram pulados */
+    late = 0;
     /** quadros reais e criados pela geracao de quadros */
     fgReal = 0;
     fgMade = 0;
@@ -611,18 +683,32 @@ export class LatestFramePainter {
     private gl: FilterGl | null = null;
 
     get fgActive() { return viewFg.mult > 1 && !!this.gl?.fgOk; }
+    get fgSkipped() { return this.gl?.skipped ?? 0; }
 
     push(frame: VideoFrame) {
-        if (!this.fgActive) {
-            this.latest?.close();
-            this.latest = frame;
-            return;
-        }
         // o transmissor repete o ultimo quadro quando o jogo nao mandou um novo: mesmo horario = repetido
         if (frame.timestamp === this.lastTs) { frame.close(); return; }
+        if (frame.timestamp < this.lastTs) {
+            // live reiniciou (horario voltou): recomeca a medida
+            this.lags = [];
+            this.pending.forEach(p => p.f.close());
+            this.pending = [];
+        }
         this.lastTs = frame.timestamp;
-        this.queue.push(frame);
-        while (this.queue.length > 3) this.queue.shift()!.close();
+        this.fresh++;
+        const now = performance.now();
+        if (this.lastArrival) this.maxGap = Math.max(this.maxGap, now - this.lastArrival);
+        this.lastArrival = now;
+        this.lags.push(now - frame.timestamp / 1000);
+        if (this.lags.length > 180) this.lags.shift();
+        const sorted = [...this.lags].sort((a, b) => a - b);
+        this.base = sorted[0];
+        // folga = maior variacao recente das chegadas + 3 ms, no maximo 60 ms
+        this.delay = Math.min(60, sorted[sorted.length - 1] - this.base + 3);
+        // no comeco ainda nao se conhece a rede: comeca com 20 ms para nao precisar crescer aos trancos
+        if (this.lags.length < 60) this.delay = Math.max(this.delay, 20);
+        this.pending.push({ f: frame, due: frame.timestamp / 1000 + this.base + this.delay });
+        while (this.pending.length > 8) this.pending.shift()!.f.close();
     }
 
     private fit(w: number, h: number) {
@@ -632,21 +718,29 @@ export class LatestFramePainter {
         }
     }
 
+    /** quadros cuja hora de exibicao ja chegou (com 4 ms de antecedencia, para cair na pintura certa) */
+    private takeReady(now: number) {
+        const out: VideoFrame[] = [];
+        while (this.pending.length && this.pending[0].due <= now + 4) out.push(this.pending.shift()!.f);
+        return out;
+    }
+
     private loop() {
         if (this.stopped) return;
-        if (this.fgActive) this.fgStep(performance.now());
-        else {
-            // geracao desligada: imagem como chega
-            if (this.queue.length) {
-                this.latest?.close();
-                this.latest = this.queue.pop()!;
-                this.queue.forEach(q => q.close());
-                this.queue = [];
-            }
+        const now = performance.now();
+        const ready = this.takeReady(now);
+        if (this.fgActive) {
+            this.queue.push(...ready);
+            this.fgStep(now);
+        } else {
+            // sem geracao: um quadro por pintura, na ordem; se mais de 2 deram a hora juntos (rede travou), pula os mais velhos
+            this.queue.forEach(q => q.close());
+            this.queue = [];
             this.seg = null;
-            const f = this.latest;
+            while (ready.length > 2) { ready.shift()!.close(); this.late++; }
+            const f = ready.shift();
+            if (ready.length) this.pending.unshift({ f: ready[0], due: now });
             if (f) {
-                this.latest = null;
                 this.fit(f.displayWidth, f.displayHeight);
                 if (this.gl) this.gl.draw(f, f.displayWidth, f.displayHeight);
                 else this.ctx!.drawImage(f, 0, 0);
@@ -660,11 +754,10 @@ export class LatestFramePainter {
 
     private fgStep(now: number) {
         const gl = this.gl!;
-        if (this.latest) { this.queue.push(this.latest); this.latest = null; }
         const seg = this.seg;
         // o proximo trecho comeca quando o atual termina; so se acumularem 3 (rede travou) pula para o mais novo
         if (this.queue.length && (!seg || now >= seg.end || this.queue.length >= 3)) {
-            if (seg && now < seg.end) while (this.queue.length > 1) this.queue.shift()!.close();
+            if (seg && now < seg.end) while (this.queue.length > 1) { this.queue.shift()!.close(); this.late++; }
             const f = this.queue.shift()!;
             const w = f.displayWidth, h = f.displayHeight;
             this.fit(w, h);
@@ -697,8 +790,8 @@ export class LatestFramePainter {
     stop() {
         this.stopped = true;
         cancelAnimationFrame(this.raf);
-        this.latest?.close();
-        this.latest = null;
+        this.pending.forEach(p => p.f.close());
+        this.pending = [];
         this.queue.forEach(q => q.close());
         this.queue = [];
     }
