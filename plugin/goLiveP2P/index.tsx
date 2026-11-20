@@ -3,9 +3,7 @@ import { copyWithToast } from "@utils/discord";
 import { ModalRoot, ModalSize, openModal } from "@utils/modal";
 import { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import definePlugin, { PluginNative } from "@utils/types";
-import { ContextMenuApi, Menu, Popout, ScrollerThin, SelectedChannelStore, UserStore, useEffect, useRef, useState } from "@webpack/common";
-import { findComponentByCodeLazy } from "@webpack";
-import ErrorBoundary from "@components/ErrorBoundary";
+import { ContextMenuApi, Menu, ScrollerThin, SelectedChannelStore, UserStore, useEffect, useRef, useState } from "@webpack/common";
 
 import { FilesButton } from "./files";
 import { MusicButton } from "./music";
@@ -14,7 +12,7 @@ import { getWatchUrl, startManager, stopManager } from "./manager";
 import { Settings } from "@api/Settings";
 import { settings } from "./settings";
 import { getLiveEntry, refreshLiveOutput } from "./nativeUi";
-import { viewFg, viewFilter } from "./hwvideo";
+import { applyViewFilter } from "./viewPrefs";
 import { CursorMode, getLive, listCameras, LiveSource, PRESETS, Preset, sourcesApi } from "./live";
 
 const Native = VencordNative.pluginHelpers.pdLink as PluginNative<typeof import("./native")>;
@@ -367,75 +365,6 @@ function LiveModal({ modalProps }: { modalProps: any; }) {
     );
 }
 
-// Limpeza (filtro que preserva bordas) e nitidez (CAS) aplicadas na placa de video em cada quadro das lives que eu assisto
-const VIEW_FILTERS = [
-    { id: "off", label: "Desligada (imagem original)", clean: 0, sharp: 0, amount: 0 },
-    { id: "low", label: "Leve", clean: 0.3, sharp: 0.6, amount: 1.5 },
-    { id: "mid", label: "Média", clean: 0.5, sharp: 1, amount: 2.5 },
-    { id: "high", label: "Forte", clean: 0.6, sharp: 1, amount: 4 }
-];
-
-function applyViewFilter() {
-    const f = VIEW_FILTERS.find(v => v.id === settings.store.viewFilter) ?? VIEW_FILTERS[2];
-    viewFilter.clean = f.clean;
-    viewFilter.sharp = f.sharp;
-    viewFilter.amount = f.amount;
-    viewFg.mult = [1, 2, 3, 4].includes(settings.store.viewFg) ? settings.store.viewFg : 1;
-}
-
-const FG_MULTS = [
-    { m: 1, label: "Desligada" },
-    { m: 2, label: "2x" },
-    { m: 3, label: "3x" },
-    { m: 4, label: "4x" }
-];
-
-// Botao na barra do topo do Discord (ao lado dos icones de caixa de entrada e ajuda): tratamento da imagem das lives que eu assisto
-const HeaderBarIcon = findComponentByCodeLazy(".HEADER_BAR_BADGE_BOTTOM,", 'position:"bottom"');
-
-function ViewIcon() {
-    return (
-        <svg viewBox="0 0 24 24" width={20} height={20} style={{ color: "var(--interactive-icon-default)" }}>
-            <path fill="currentColor" d="M12 5c-5 0-9 4.5-10 7 1 2.5 5 7 10 7s9-4.5 10-7c-1-2.5-5-7-10-7Zm0 11.5A4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 0 1 0 9Zm0-7a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5ZM19 1l.7 1.8L21.5 3.5l-1.8.7L19 6l-.7-1.8-1.8-.7 1.8-.7z" />
-        </svg>
-    );
-}
-
-function ViewMenu({ onClose }: { onClose: () => void; }) {
-    const [, redraw] = useState(0);
-    const pick = (fn: () => void) => () => { fn(); applyViewFilter(); redraw(n => n + 1); };
-    return (
-        <Menu.Menu navId="pdlink-view" onClose={onClose} aria-label="Imagem das lives">
-            <Menu.MenuGroup label="Limpeza e nitidez">
-                {VIEW_FILTERS.map(f => (
-                    <Menu.MenuRadioItem key={f.id} group="pdlink-view-filter-g" id={"pdlink-view-" + f.id} label={f.label}
-                        checked={settings.store.viewFilter === f.id} action={pick(() => { settings.store.viewFilter = f.id; })} />
-                ))}
-            </Menu.MenuGroup>
-            <Menu.MenuGroup label="Geração de quadros">
-                {FG_MULTS.map(o => (
-                    <Menu.MenuRadioItem key={o.m} group="pdlink-view-fg-g" id={"pdlink-fg-" + o.m} label={o.label}
-                        checked={(settings.store.viewFg || 1) === o.m} action={pick(() => { settings.store.viewFg = o.m; })} />
-                ))}
-            </Menu.MenuGroup>
-        </Menu.Menu>
-    );
-}
-
-function ViewButton() {
-    const ref = useRef(null);
-    const [show, setShow] = useState(false);
-    return (
-        <Popout position="bottom" align="right" animation={Popout.Animation.NONE} shouldShow={show}
-            onRequestClose={() => setShow(false)} targetElementRef={ref} renderPopout={() => <ViewMenu onClose={() => setShow(false)} />}>
-            {(_, { isShown }) => (
-                <HeaderBarIcon ref={ref} className="pdlink-view-btn" onClick={() => setShow(v => !v)}
-                    tooltip={isShown ? null : "pdLink: imagem das lives"} icon={ViewIcon} selected={isShown} />
-            )}
-        </Popout>
-    );
-}
-
 // Menu da live de outra pessoa (botao direito no quadro): onde o som dela toca
 const streamContext: NavContextMenuPatchCallback = (children, { stream }: { stream?: { ownerId?: string; }; }) => {
     const owner = stream?.ownerId;
@@ -496,14 +425,6 @@ export default definePlugin({
     contextMenus: { "stream-context": streamContext },
 
     patches: [
-        {
-            // Barra do topo (mesmo ponto que o Vencord Toolbox usa; aceita o Toolbox ligado junto)
-            find: '?"BACK_FORWARD_NAVIGATION":',
-            replacement: {
-                match: /(trailing:.{0,50}?(?:\i\.Fragment|Vencord\.Plugins\.plugins\["VencordToolbox"\]\.TrailingWrapper),\{children:\[)/,
-                replace: "$1$self.renderViewButton(),"
-            }
-        },
         {
             // Botao de arquivos na barra de controles da chamada, a esquerda dos botoes do Discord (microfone, camera...).
             // A barra fica dentro da tela cheia, entao o botao tambem aparece la.
@@ -622,10 +543,6 @@ export default definePlugin({
 
     renderFilesButton() {
         return <><MusicButton /><FilesButton /></>;
-    },
-
-    renderViewButton() {
-        return <ErrorBoundary key="pdlink-view" noop><ViewButton /></ErrorBoundary>;
     },
 
     start() {

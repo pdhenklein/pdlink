@@ -2,6 +2,7 @@ import { React, ReactDOM, useEffect, useRef, useState, UserStore } from "@webpac
 
 import { Board, makeBoard, Mark, View } from "./marksCore";
 import { settings } from "./settings";
+import { applyViewFilter, FG_MULTS, VIEW_FILTERS } from "./viewPrefs";
 
 // Ping e desenho de quem assiste: uma camada transparente sobre o video, uma barra de ferramentas que aparece
 // quando o mouse esta em cima, e a ponte com o transmissor (canal "m" do P2P).
@@ -127,6 +128,8 @@ const PingIcon = () => <svg {...I}><path d="M12 2a1 1 0 0 1 1 1v2.06A7 7 0 0 1 1
 const PenIcon = () => <svg {...I}><path d="m16.9 3.3 3.8 3.8a1.5 1.5 0 0 1 0 2.1L9.6 20.3 4 21l.7-5.6L15.9 3.3a1.5 1.5 0 0 1 1-.4Z" /></svg>;
 const EraserIcon = () => <svg {...I}><path d="m15.1 3.6 5.3 5.3a2 2 0 0 1 0 2.8L12 20h8v2H8.6l-4.9-4.9a2 2 0 0 1 0-2.8l9.3-9.3a2 2 0 0 1 2.8 0ZM7 15.4 9.6 18l5.2-5.2L12.2 10 7 15.4Z" /></svg>;
 const TrashIcon = () => <svg {...I}><path d="M9 3h6l1 2h4v2H4V5h4l1-2Zm-3 6h12l-1 12H7L6 9Z" /></svg>;
+const ImageIcon = () => <svg {...I}><path d="M4 7h9.2a3 3 0 0 1 5.6 0H20v2h-1.2a3 3 0 0 1-5.6 0H4V7Zm12 1a1 1 0 1 0 0 0Zm-12 7h1.2a3 3 0 0 1 5.6 0H20v2h-9.2a3 3 0 0 1-5.6 0H4v-2Zm4 1a1 1 0 1 0 0 0Z" /><circle cx="16" cy="8" r="1.6" /><circle cx="8" cy="16" r="1.6" /></svg>;
+const CheckIcon = () => <svg width={14} height={14} viewBox="0 0 24 24" fill="currentColor"><path d="m9.5 16.2-4.2-4.2-1.4 1.4 5.6 5.6 11-11-1.4-1.4z" /></svg>;
 const CloseIcon = () => <svg {...I}><path d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z" /></svg>;
 
 // ------------------------------------------------------------------ a camada
@@ -146,17 +149,39 @@ function Btn({ title, active, onClick, children }: { title: string; active?: boo
     );
 }
 
+// Menu de imagem da live (limpeza/nitidez e geracao de quadros): vale so para quem esta assistindo
+function ImageMenu() {
+    const [, redraw] = useState(0);
+    const pick = (fn: () => void) => (e: React.MouseEvent) => { e.stopPropagation(); fn(); applyViewFilter(); redraw(n => n + 1); };
+    const head = (t: string) => <div style={{ fontSize: 11, fontWeight: 700, color: "#949ba4", padding: "6px 8px 4px", textTransform: "uppercase", letterSpacing: ".02em" }}>{t}</div>;
+    const item = (key: string, label: string, on: boolean, act: (e: React.MouseEvent) => void) => (
+        <button key={key} onClick={act} style={{ all: "unset", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 8px", borderRadius: 5, fontSize: 13, color: on ? "#fff" : "#dbdee1", background: on ? "rgba(88,101,242,.3)" : "transparent" }}
+            onMouseEnter={e => { if (!on) e.currentTarget.style.background = "rgba(255,255,255,.06)"; }} onMouseLeave={e => { if (!on) e.currentTarget.style.background = "transparent"; }}>
+            {label}{on && <CheckIcon />}
+        </button>
+    );
+    return (
+        <div style={{ position: "absolute", top: 42, right: 0, width: 190, display: "flex", flexDirection: "column", padding: 6, borderRadius: 10, background: "rgba(24,25,28,.97)", boxShadow: "0 4px 14px rgba(0,0,0,.45)" }}>
+            {head("Limpeza e nitidez")}
+            {VIEW_FILTERS.map(f => item(f.id, f.label, settings.store.viewFilter === f.id, pick(() => { settings.store.viewFilter = f.id; })))}
+            {head("Geração de quadros")}
+            {FG_MULTS.map(o => item(String(o.m), o.label, (settings.store.viewFg || 1) === o.m, pick(() => { settings.store.viewFg = o.m; })))}
+        </div>
+    );
+}
+
 export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideoElement | null>; ownerId: string; }) {
     useBus();
     const session = sessions.get(ownerId);
     const [box, setBox] = useState<{ l: number; t: number; w: number; h: number; } | null>(null);
     const [hover, setHover] = useState(false);
     const [palette, setPalette] = useState(false);
+    const [imgMenu, setImgMenu] = useState(false);
     const [idle, setIdle] = useState(false);
     const [, setTick] = useState(0);
     const idleTimer = useRef<any>(0);
     const paletteOpen = useRef(false);
-    paletteOpen.current = palette;
+    paletteOpen.current = palette || imgMenu;
     const canvas = useRef<HTMLCanvasElement>(null);
     const loop = useRef(0);
     const stroke = useRef<{ pts: [number, number][]; first: boolean; raf: number; down: boolean; } | null>(null);
@@ -164,7 +189,7 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
     const pingAt = useRef<((cx: number, cy: number) => boolean) | null>(null);
     const midHandled = useRef(0);
     const allowed = !!session && session.allowed();
-    const active = ui.mode !== "off";
+    const active = allowed && ui.mode !== "off";
 
     const measure = () => {
         const v = video.current;
@@ -273,14 +298,14 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
     }, []);
 
     pingAt.current = null;
-    if (!session || !allowed || !box || box.w < 120 || box.h < 70) return null;
+    if (!session || !box || box.w < 120 || box.h < 70) return null;
     const v = video.current;
     const doc = v?.ownerDocument;
     if (!v || !doc) return null;
     const fs = doc.fullscreenElement as HTMLElement | null;
     const target: HTMLElement = fs && fs !== v && fs.contains(v) ? fs : doc.body;
     const self = UserStore.getCurrentUser()?.id as string | undefined;
-    const showBar = hover || active;
+    const showBar = hover || active || imgMenu;
 
     const toNorm = (cx: number, cy: number): [number, number] | null => {
         const b = measure(), vv = video.current;
@@ -294,6 +319,7 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
 
     // ping no ponto (usado pelo modo ping e pelo botao do meio); false = clique fora da imagem (faixa preta)
     const doPing = (cx: number, cy: number) => {
+        if (!allowed) return false;
         const p = toNorm(cx, cy);
         if (!p) return false;
         const now = performance.now();
@@ -393,8 +419,8 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
                         background: "rgba(24,25,28,.92)", boxShadow: "0 4px 14px rgba(0,0,0,.45)", userSelect: "none"
                     }}
                 >
-                    <Btn title="Ping (ou clique com o botão do meio do mouse)" active={ui.mode === "ping"} onClick={() => changeMode(ui.mode === "ping" ? "off" : "ping")}><PingIcon /></Btn>
-                    <Btn title="Desenhar" active={ui.mode === "draw" && ui.tool === "pen"} onClick={() => { if (ui.mode !== "draw") changeMode("draw"); setUi({ tool: "pen" }); }}><PenIcon /></Btn>
+                    {allowed && <Btn title="Ping (ou clique com o botão do meio do mouse)" active={ui.mode === "ping"} onClick={() => changeMode(ui.mode === "ping" ? "off" : "ping")}><PingIcon /></Btn>}
+                    {allowed && <Btn title="Desenhar" active={ui.mode === "draw" && ui.tool === "pen"} onClick={() => { if (ui.mode !== "draw") changeMode("draw"); setUi({ tool: "pen" }); }}><PenIcon /></Btn>}
                     {ui.mode === "draw" && <Btn title="Borracha" active={ui.tool === "eraser"} onClick={() => setUi({ tool: ui.tool === "eraser" ? "pen" : "eraser" })}><EraserIcon /></Btn>}
                     {active && colorBtn}
                     {ui.mode === "draw" && ui.tool === "pen" && (
@@ -409,7 +435,10 @@ export function MarkLayer({ video, ownerId }: { video: React.RefObject<HTMLVideo
                         ><TrashIcon /></Btn>
                     )}
                     {active && <Btn title="Fechar (Esc). Fechar o desenho apaga o que voce desenhou" onClick={() => changeMode("off")}><CloseIcon /></Btn>}
-                    {palette && active && (
+                    {allowed && <span style={{ width: 1, height: 20, background: "rgba(255,255,255,.15)", margin: "0 4px" }} />}
+                    <Btn title="Imagem: limpeza, nitidez e geração de quadros (só para você)" active={imgMenu} onClick={() => { setImgMenu(o => !o); setPalette(false); }}><ImageIcon /></Btn>
+                    {imgMenu && <ImageMenu />}
+                    {palette && active && !imgMenu && (
                         <div style={{ position: "absolute", top: 42, left: "50%", transform: "translateX(-50%)", display: "flex", gap: 6, padding: 8, borderRadius: 10, background: "rgba(24,25,28,.96)", boxShadow: "0 4px 14px rgba(0,0,0,.45)", alignItems: "center" }}>
                             {COLORS.map(c => (
                                 <button
