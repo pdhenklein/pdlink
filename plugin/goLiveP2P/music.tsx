@@ -158,9 +158,51 @@ function Playlists({ b }: { b: Bound; }) {
     const q = b.sync.state.queue;
     return (
         <div>
+            <ImportList />
             {q.length > 0 && <div style={{ padding: "2px 6px 8px" }}><SaveAs items={q} /></div>}
-            {!S.playlists.length && <Empty>Salve a fila atual, as curtidas ou um link de playlist do YouTube. As playlists ficam guardadas no seu PC.</Empty>}
+            {!S.playlists.length && <Empty>Cole acima o link de uma playlist do Spotify ou do YouTube, ou salve a fila atual. As playlists ficam guardadas no seu PC.</Empty>}
             {S.playlists.map((pl, i) => <ListRow key={pl.name} name={pl.name} count={pl.items.length} img={pl.items[0]?.img ?? ""} onOpen={() => { S.openList = i; emit(); }} onDelete={() => { S.playlists = S.playlists.filter(x => x !== pl); saveLists(); }} />)}
+        </div>
+    );
+}
+
+/** Campo "colar link de playlist": le a playlist do Spotify ou do YouTube e guarda com o nome dela. */
+function ImportList() {
+    const [url, setUrl] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState<{ ok: boolean; text: string; } | null>(null);
+    const go = async () => {
+        const link = url.trim();
+        if (!link || busy) return;
+        if (!/^https?:\/\//i.test(link)) { setMsg({ ok: false, text: "Cole o link da playlist (comeca com https://)." }); return; }
+        setBusy(true); setMsg(null);
+        const r = await NativeMusic.musicSearch(link).catch((e: any) => ({ ok: false, error: String(e?.message ?? e) }));
+        setBusy(false);
+        if (!r.ok) { setMsg({ ok: false, text: r.error }); return; }
+        if (!r.list || !r.items.length) { setMsg({ ok: false, text: "Esse link nao e de uma playlist ou album." }); return; }
+        const base = (r.name || "Playlist importada").trim();
+        let name = base;
+        for (let i = 2; S.playlists.some(p => p.name === name); i++) name = `${base} (${i})`;
+        S.playlists = [{ name, items: r.items.map(plain).slice(0, 500) }, ...S.playlists];
+        saveLists(); setUrl("");
+        setMsg({
+            ok: true, text: `"${name}" importada com ${Math.min(r.items.length, 500)} musicas.` + (r.capped
+                ? " O Spotify so libera as 100 primeiras pelo link. Para trazer a playlist inteira, passe ela para o YouTube (o site TuneMyMusic faz isso de graca) e cole aqui o link do YouTube."
+                : "")
+        });
+    };
+    return (
+        <div style={{ padding: "2px 6px 10px" }}>
+            <div style={{ display: "flex", gap: 6 }}>
+                <input
+                    value={url} placeholder="Cole o link de uma playlist do Spotify ou do YouTube" spellCheck={false} disabled={busy}
+                    onChange={e => setUrl(e.currentTarget.value)}
+                    onKeyDown={e => { e.stopPropagation(); if (e.key === "Enter") go(); }}
+                    style={{ all: "unset", flex: 1, minWidth: 0, fontSize: 12, color: col.text, background: col.hover, padding: "6px 10px", borderRadius: 6 }}
+                />
+                <button className="pdl-b" onClick={go} style={{ ...pill, color: "#fff", background: col.brand, opacity: busy ? .6 : 1 }}>{busy ? "Importando..." : "Importar"}</button>
+            </div>
+            {msg && <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.4, color: msg.ok ? col.green : col.red }}>{msg.text}</div>}
         </div>
     );
 }
@@ -180,14 +222,14 @@ function ListRow({ name, count, img, onOpen, onDelete }: { name: string; count: 
 }
 
 /** Aba "Do PC": arquivos de musica deste PC. O arquivo fica aqui; a chamada ouve o som transmitido por mim. */
-const BROWSER_NAMES: Record<string, string> = { firefox: "Firefox", edge: "Microsoft Edge", chrome: "Google Chrome", brave: "Brave", opera: "Opera" };
+const BROWSER_NAMES: Record<string, string> = { firefox: "Firefox", edge: "Microsoft Edge", chrome: "Google Chrome", brave: "Brave", opera: "Opera", operagx: "Opera GX" };
 const NativeMusic = VencordNative.pluginHelpers.pdLink as any;
 
 /** Conta do YouTube: entrar pelo navegador padrao para o YouTube parar de pedir "confirme que voce nao e um robo". */
 function Account() {
     const [step, setStep] = useState<"" | "abriu" | "testando">("");
     const [msg, setMsg] = useState<{ ok: boolean; text: string; } | null>(null);
-    const cur = settings.store.ytBrowser ?? "";
+    const cur = settings.use(["ytBrowser"]).ytBrowser ?? "";
     const use = (b: string) => { settings.store.ytBrowser = b; NativeMusic.musicSetBrowser?.(b); };
     const login = async () => {
         setMsg(null);
@@ -199,7 +241,7 @@ function Account() {
     const check = async () => {
         setStep("testando");
         const r = await NativeMusic.musicYtCheck();
-        setStep("");
+        setStep(r.ok ? "" : "abriu");
         setMsg(r.ok ? { ok: true, text: "Pronto! As musicas do YouTube agora usam a sua conta." } : { ok: false, text: r.error });
     };
     const btn = (label: string, onClick: () => void, primary?: boolean) => (
@@ -220,7 +262,7 @@ function Account() {
                     : step === "testando" ? <span style={{ color: col.muted, fontSize: 13 }}>Conferindo o login...</span>
                         : <>{btn(cur ? "Entrar de novo" : "Entrar com o YouTube", login, true)}{cur && btn("Desligar", () => { use(""); setMsg(null); })}</>}
             </div>
-            {step === "abriu" && <div style={{ color: col.muted, fontSize: 12 }}>Entre na sua conta na pagina que abriu no navegador e depois clique em "Pronto, ja entrei".</div>}
+            {step === "abriu" && <div style={{ color: col.muted, fontSize: 12 }}>Se a pagina ja abriu com a sua conta, voce ja esta logado: nao precisa fazer mais nada no site. Feche o navegador por completo (Chrome, Edge, Opera e Brave travam o login enquanto estao abertos) e clique em "Pronto, ja entrei".</div>}
             {msg && <div style={{ fontSize: 12, color: msg.ok ? col.green : col.red }}>{msg.text}</div>}
             <div style={{ color: col.muted, fontSize: 11, marginTop: 4 }}>Entrou em outro navegador?</div>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>

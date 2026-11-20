@@ -17,7 +17,8 @@ export const settings = definePluginSettings({
             { label: "Microsoft Edge", value: "edge" },
             { label: "Google Chrome", value: "chrome" },
             { label: "Brave", value: "brave" },
-            { label: "Opera", value: "opera" }
+            { label: "Opera", value: "opera" },
+            { label: "Opera GX", value: "operagx" }
         ],
         onChange: (v: string) => { (VencordNative.pluginHelpers.pdLink as any)?.musicSetBrowser?.(v).catch?.(() => { }); }
     },

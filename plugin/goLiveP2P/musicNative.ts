@@ -17,7 +17,11 @@ const exe = () => join(dir, "yt-dlp.exe");
 
 // Login do YouTube: a pessoa escolhe (nas opcoes) o navegador onde ja esta logada; o yt-dlp usa essa sessao.
 // Desligado por padrao. So nomes desta lista chegam ao yt-dlp.
-const BROWSERS = new Set(["firefox", "edge", "chrome", "brave", "opera"]);
+const NAMES: Record<string, string> = { firefox: "Firefox", edge: "Microsoft Edge", chrome: "Google Chrome", brave: "Brave", opera: "Opera", operagx: "Opera GX" };
+const BROWSERS = new Set(Object.keys(NAMES));
+const browserName = () => NAMES[browser] ?? browser;
+// O yt-dlp so conhece o Opera comum; o Opera GX guarda o login em outra pasta, entao passo a pasta dele
+const cookieArg = (b: string) => b === "operagx" ? "opera:" + join(process.env.APPDATA ?? "", "Opera Software", "Opera GX Stable") : b;
 let browser = "";
 export function musicBrowser(b: string) {
     const v = BROWSERS.has(b) ? b : "";
@@ -29,8 +33,8 @@ export function musicBrowser(b: string) {
 export function defaultBrowser(): Promise<string> {
     return new Promise(res => {
         execFile("reg", ["query", "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice", "/v", "ProgId"], { windowsHide: true, timeout: 10000, encoding: "utf8" }, (e, out) => {
-            const id = e ? "" : (/ProgId\s+REG_SZ\s+(\S+)/i.exec(String(out))?.[1] ?? "");
-            res(/^Firefox/i.test(id) ? "firefox" : /^MSEdge/i.test(id) ? "edge" : /^Chrome/i.test(id) ? "chrome" : /^Brave/i.test(id) ? "brave" : /^Opera/i.test(id) ? "opera" : "");
+            const id = e ? "" : (/ProgId\s+REG_SZ\s+(.+)/i.exec(String(out))?.[1] ?? "");
+            res(/^Firefox/i.test(id) ? "firefox" : /^MSEdge/i.test(id) ? "edge" : /^Chrome/i.test(id) ? "chrome" : /^Brave/i.test(id) ? "brave" : /^Opera\s*GX/i.test(id) ? "operagx" : /^Opera/i.test(id) ? "opera" : "");
         });
     });
 }
@@ -44,7 +48,7 @@ export async function musicCheckLogin(): Promise<{ ok: true; } | { ok: false; er
         return { ok: true };
     } catch (e: any) {
         const m = String(e?.message ?? e);
-        return { ok: false, error: /login|sign in|cookies? .*(no|not)|history/i.test(m) && !/robo|navegador/.test(m) ? "o login ainda nao aparece nesse navegador. Termine de entrar no YouTube por la e clique em Pronto de novo" : m };
+        return { ok: false, error: /requires? (an? )?(account|login)|login required|sign in to view|not logged in/i.test(m) ? "o login ainda nao aparece nesse navegador. Termine de entrar no YouTube por la e clique em Pronto de novo" : m };
     }
 }
 const cacheDir = () => join(dir, "cache");
@@ -91,17 +95,17 @@ function selfUpdate() {
 
 function run(args: string[], timeout: number) {
     return new Promise<string>((res, rej) => {
-        const login = browser ? ["--cookies-from-browser", browser] : [];
+        const login = browser ? ["--cookies-from-browser", cookieArg(browser)] : [];
         execFile(exe(), ["--no-warnings", "--no-config", "--ignore-config", "--use-extractors", "default,-generic", ...login, ...args], { windowsHide: true, timeout, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (e, out, err) => {
             if (e) {
                 const raw = (String(err).trim().split("\n").filter(l => /ERROR/.test(l)).pop() ?? String(e.message)).replace(/^ERROR:\s*/, "");
                 // o YouTube as vezes bloqueia downloads de uma internet por um tempo ("confirme que voce nao e um robo")
                 rej(new Error(/not a bot|Sign in to confirm/i.test(raw)
                     ? (browser
-                        ? "o YouTube pediu login de novo: abra o YouTube no " + browser + " e confira se o login esta ativo, ou tente outro navegador nas opcoes do pdLink"
-                        : "o YouTube bloqueou por um tempo os downloads desta internet. Tente mais tarde, use SoundCloud, Suno ou musica do PC, ou ligue \"Musica do YouTube com a sua conta\" nas opcoes do pdLink")
+                        ? "o YouTube pediu login de novo: abra o YouTube no " + browserName() + " e confira se o login esta ativo, ou escolha outro navegador na aba Conta da janela de musica"
+                        : "o YouTube bloqueou por um tempo os downloads desta internet. Tente mais tarde, use SoundCloud, Suno ou musica do PC, ou entre com a sua conta na aba Conta da janela de musica")
                     : /cookie|decrypt|DPAPI|could not find .* database|Could not copy/i.test(raw)
-                        ? "nao consegui usar o login do " + browser + ". Feche esse navegador e tente de novo, ou escolha o Firefox nas opcoes do pdLink"
+                        ? "nao consegui ler o login do " + browserName() + " porque ele esta aberto. Feche o " + browserName() + " por completo (inclusive o icone perto do relogio) e clique em Pronto de novo. Se nao der, entre no YouTube pelo Firefox e escolha Firefox abaixo"
                         : raw.slice(0, 200)));
             }
             else res(String(out));
@@ -217,7 +221,7 @@ async function spotifyEntity(kind: string, id: string) {
 }
 
 /** Le uma musica, album ou playlist do Spotify. A ref de cada musica e o link dela no Spotify. */
-async function spotifyPage(url: string): Promise<{ items: Found[]; list: boolean; }> {
+async function spotifyPage(url: string): Promise<{ items: Found[]; list: boolean; name?: string; capped?: boolean; }> {
     const p = spotifyParts(url);
     if (!p) throw new Error("use um link de musica, album ou playlist do Spotify");
     const e = await spotifyEntity(p.kind, p.id);
@@ -236,7 +240,8 @@ async function spotifyPage(url: string): Promise<{ items: Found[]; list: boolean
         })
         .filter((x: Found | null): x is Found => !!x);
     if (!items.length) throw new Error("nao achei musicas nesse link do Spotify");
-    return { items, list: true };
+    // o link publico do Spotify so mostra as 100 primeiras musicas de uma playlist
+    return { items, list: true, name: String(e.name ?? e.title ?? "").slice(0, 60), capped: e.trackList.length >= 100 };
 }
 
 const resolved = new Map<string, { ref: string; img: string; dur: number; }>();
@@ -287,7 +292,7 @@ export async function musicResolve(ref: string, title: string, artist: string, d
 }
 
 /** Busca por nome, ou le um link (musica ou playlist). */
-export async function musicSearch(query: string): Promise<{ ok: true; items: Found[]; list: boolean; } | { ok: false; error: string; }> {
+export async function musicSearch(query: string): Promise<{ ok: true; items: Found[]; list: boolean; name?: string; capped?: boolean; } | { ok: false; error: string; }> {
     try {
         query = String(query ?? "").trim().slice(0, 400);
         if (!query) return { ok: true, items: [], list: false };
@@ -300,11 +305,11 @@ export async function musicSearch(query: string): Promise<{ ok: true; items: Fou
         }
         await ensureTool();
         const target = isUrl ? query : "ytsearch8:" + query;
-        const out = await run(["-J", "--flat-playlist", "--playlist-end", "200", "--", target], 40000);
+        const out = await run(["-J", "--flat-playlist", "--playlist-end", "500", "--", target], 60000);
         const d = JSON.parse(out);
         const entries: any[] = Array.isArray(d.entries) ? d.entries : [d];
         const items = entries.map(toFound).filter((x): x is Found => !!x);
-        return { ok: true, items, list: isUrl && Array.isArray(d.entries) };
+        return { ok: true, items, list: isUrl && Array.isArray(d.entries), name: String(d.title ?? "").slice(0, 60) };
     } catch (e: any) {
         note("musica: busca falhou - " + String(e?.message ?? e));
         return { ok: false, error: String(e?.message ?? e) };
