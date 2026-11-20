@@ -27,7 +27,7 @@ const PKG_DIR = __dirname;
 const PACKAGED = existsSync(join(PKG_DIR, "golive-helper.exe"));
 const VIEWER_PAGE = PACKAGED ? join(PKG_DIR, "viewer.html") : "F:/Discord2/Vencord/src/userplugins/goLiveP2P/viewer.html";
 const WATCH_PORT = 47615;
-const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p20.exe";
+const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p21.exe";
 // relatorios de diagnostico: no pacote ficam na pasta de dados do usuario
 const PROBE_DIR = PACKAGED ? join(PKG_DIR, "..", "logs") : "F:/Discord2/probe";
 
@@ -107,7 +107,7 @@ export async function getSources(_: IpcMainInvokeEvent, q: SourcesQuery = {}) {
         }
     };
     // janelas que o seletor nativo do Discord nao mostra
-    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "golive-helper-p8.exe", "golive-helper-p12.exe", "golive-helper-p13.exe", "golive-helper-p14.exe", "golive-helper-p15.exe", "golive-helper-p16.exe", "golive-helper-p17.exe", "golive-helper-p18.exe", "golive-helper-p19.exe", "golive-helper-p20.exe", "whatsapp.root.exe", "whatsapp.exe"]);
+    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "golive-helper-p8.exe", "golive-helper-p12.exe", "golive-helper-p13.exe", "golive-helper-p14.exe", "golive-helper-p15.exe", "golive-helper-p16.exe", "golive-helper-p17.exe", "golive-helper-p18.exe", "golive-helper-p19.exe", "golive-helper-p20.exe", "golive-helper-p21.exe", "whatsapp.root.exe", "whatsapp.exe"]);
     list.windows = list.windows.filter((w: any) => !hidden.has(String(w.exe).toLowerCase()));
     const windows = list.windows.map((w: any) => ({ ...w, thumb: thumb("w" + w.hwnd), icon: icon("i" + w.hwnd) }));
     const monitors = list.monitors.map((m: any) => ({ ...m, thumb: thumb("m" + m.index) }));
@@ -222,7 +222,8 @@ export async function startStream(_: IpcMainInvokeEvent, o: StreamOpts) {
     });
     proc.stderr!.on("data", (d: Buffer) => {
         lastError = d.toString("utf8").slice(-300); lastStat = d.toString("utf8");
-        if (errLines++ < 8) logLine("captura diz: " + lastStat.trim().slice(0, 300));
+        // entrou ou saiu programa do som do monitor: sempre anota (para saber de onde veio um som que vazou)
+        if (errLines++ < 8 || /^audio: [+-] /m.test(lastStat)) logLine("captura diz: " + lastStat.trim().slice(0, 300));
     });
     proc.on("exit", code => {
         logLine(`captura: encerrada (codigo ${code})${code ? " - " + lastError.trim().slice(-200) : ""}`);

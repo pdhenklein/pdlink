@@ -393,6 +393,171 @@ static ComPtr<IAudioClient> activateProcessLoopback(DWORD pid, HRESULT& hrOut, b
     return handler->client;
 }
 
+// Tela inteira com mais de um monitor: o som vem so dos programas que tem janela no monitor transmitido.
+// O Windows so separa o som por processo (e seus filhos), entao cada programa ganha uma captura e aqui elas viram um som so.
+static std::map<DWORD, DWORD> parentOfPids() {
+    std::map<DWORD, DWORD> par;
+    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (s == INVALID_HANDLE_VALUE) return par;
+    PROCESSENTRY32W e{ sizeof e };
+    for (BOOL ok = Process32FirstW(s, &e); ok; ok = Process32NextW(s, &e)) par[e.th32ProcessID] = e.th32ParentProcessID;
+    CloseHandle(s);
+    return par;
+}
+
+static bool inTree(DWORD pid, DWORD root, const std::map<DWORD, DWORD>& par) {
+    for (int i = 0; i < 64 && pid; i++) {
+        if (pid == root) return true;
+        auto it = par.find(pid);
+        if (it == par.end() || it->second == pid) break;
+        pid = it->second;
+    }
+    return false;
+}
+
+static std::set<DWORD> pidsOnMonitor(HMONITOR mon, DWORD excludeRoot) {
+    // a barra de tarefas e o menu iniciar estao em todo monitor; o explorer e pai de quase tudo que se abre pelo atalho
+    static const wchar_t* shell[] = { L"explorer.exe", L"shellexperiencehost.exe", L"startmenuexperiencehost.exe", L"searchhost.exe",
+                                      L"textinputhost.exe", L"lockapp.exe", L"applicationframehost.exe", L"systemsettings.exe" };
+    auto par = parentOfPids();
+    std::set<DWORD> found;
+    for (auto& w : listWindows(nullptr)) {
+        if (MonitorFromWindow(w.hwnd, MONITOR_DEFAULTTONULL) != mon) continue; // minimizada: vale onde ela estava
+        DWORD pid = w.pid;
+        std::wstring exe = w.exe;
+        std::transform(exe.begin(), exe.end(), exe.begin(), ::towlower);
+        if (exe == L"applicationframehost.exe") {
+            // app da loja: a janela e do hospedeiro, o som e do processo da janela filha
+            struct A { DWORD host, app; } a{ pid, 0 };
+            EnumChildWindows(w.hwnd, [](HWND c, LPARAM lp) -> BOOL {
+                auto* a = (A*)lp; DWORD p = 0; GetWindowThreadProcessId(c, &p);
+                if (p && p != a->host) { a->app = p; return FALSE; }
+                return TRUE;
+            }, (LPARAM)&a);
+            if (!a.app) continue;
+            pid = a.app;
+        } else if (std::any_of(std::begin(shell), std::end(shell), [&](const wchar_t* s) { return exe == s; })) continue;
+        // mesas de som virtuais (Voicemeeter) tocam de novo o som do PC inteiro: capta-las traria tudo de volta
+        if (exe.rfind(L"voicemeeter", 0) == 0) continue;
+        if (pid == GetCurrentProcessId() || (excludeRoot && inTree(pid, excludeRoot, par))) continue;
+        found.insert(pid);
+    }
+    // pai e filho com janela no monitor: so o pai (a captura dele ja leva os filhos; senao o som sairia dobrado)
+    std::set<DWORD> out;
+    for (DWORD p : found) {
+        bool covered = false;
+        for (DWORD q : found) if (q != p && inTree(p, q, par)) { covered = true; break; }
+        if (!covered) out.insert(p);
+    }
+    return out;
+}
+
+static bool writePacket(uint8_t type, const BYTE* data, uint32_t len);
+static bool envOn(const char* name);
+
+static void monitorAudioLoop(HMONITOR mon, DWORD excludeRoot, std::atomic<bool>& running, std::atomic<uint64_t>& audioBytes) {
+    const uint32_t rate = 48000;
+    const size_t jitter = rate * 2 * 40 / 1000;   // 40 ms de folga: cada programa entrega o som no seu proprio ritmo
+    const size_t maxFifo = rate * 2 * 200 / 1000; // passou de 200 ms acumulados: joga o excesso fora (nao deixa atrasar)
+    struct Src {
+        ComPtr<IAudioClient> client;
+        ComPtr<IAudioCaptureClient> cap;
+        std::deque<int16_t> fifo;
+        bool primed = false;
+        double lastSeen = 0;
+        std::wstring exe;
+        HANDLE evt = nullptr; // a captura de processo so entrega som no modo com aviso (evento)
+        uint64_t got = 0;
+        int peak = 0;
+    };
+    std::map<DWORD, Src> srcs;
+    uint32_t r = rate;
+    writePacket(2, (const BYTE*)&r, 4);
+    fprintf(stderr, "audio: %u Hz, so os programas deste monitor\n", rate);
+    const double t0 = nowSec();
+    double nextScan = 0;
+    uint64_t outFrames = 0;
+    std::vector<int32_t> mix;
+    std::vector<int16_t> pcm;
+    while (running) {
+        double now = nowSec();
+        if (now >= nextScan) {
+            nextScan = now + 1.0;
+            for (DWORD pid : pidsOnMonitor(mon, excludeRoot)) {
+                auto it = srcs.find(pid);
+                if (it == srcs.end()) {
+                    Src s;
+                    s.exe = exeNameOfPid(pid);
+                    HRESULT hr = S_OK;
+                    s.client = activateProcessLoopback(pid, hr, false);
+                    WAVEFORMATEX fmt{ WAVE_FORMAT_PCM, 2, rate, rate * 4, 4, 16, 0 };
+                    s.evt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+                    if (s.client && SUCCEEDED(s.client->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK, 2000000, 0, &fmt, nullptr))
+                        && SUCCEEDED(s.client->GetService(IID_PPV_ARGS(&s.cap))) && SUCCEEDED(s.client->SetEventHandle(s.evt)) && SUCCEEDED(s.client->Start())) {
+                        fprintf(stderr, "audio: + %ls (%lu)\n", s.exe.c_str(), pid);
+                    } else {
+                        fprintf(stderr, "audio: falhou %ls (%lu, hr=0x%08lx)\n", s.exe.c_str(), pid, (unsigned long)hr);
+                        s.client.Reset(); s.cap.Reset();
+                    }
+                    it = srcs.emplace(pid, std::move(s)).first;
+                }
+                it->second.lastSeen = now;
+            }
+            // saiu do monitor (ou fechou) ha mais de 3 s: para de captar esse programa
+            for (auto it = srcs.begin(); it != srcs.end();) {
+                if (now - it->second.lastSeen > 3.0) {
+                    if (it->second.client) { it->second.client->Stop(); fprintf(stderr, "audio: - %ls (%lu)\n", it->second.exe.c_str(), it->first); }
+                    if (it->second.evt) CloseHandle(it->second.evt);
+                    it = srcs.erase(it);
+                } else ++it;
+            }
+        }
+        for (auto& [pid, s] : srcs) {
+            if (!s.cap) continue;
+            UINT32 n = 0;
+            while (SUCCEEDED(s.cap->GetNextPacketSize(&n)) && n > 0) {
+                BYTE* data = nullptr; UINT32 frames = 0; DWORD flags = 0;
+                if (FAILED(s.cap->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
+                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) s.fifo.insert(s.fifo.end(), (size_t)frames * 2, 0);
+                else {
+                    const int16_t* a = (const int16_t*)data;
+                    for (size_t i = 0; i < (size_t)frames * 2; i += 64) s.peak = std::max(s.peak, std::abs((int)a[i]));
+                    s.fifo.insert(s.fifo.end(), a, a + (size_t)frames * 2);
+                }
+                s.got += frames;
+                s.cap->ReleaseBuffer(frames);
+            }
+            if (s.fifo.size() > maxFifo) s.fifo.erase(s.fifo.begin(), s.fifo.end() - jitter);
+            if (!s.primed && s.fifo.size() >= jitter) s.primed = true;
+        }
+        // relogio proprio: entrega exatamente 48000 amostras por segundo, mesmo sem nenhum programa tocando
+        uint64_t due = (uint64_t)((now - t0) * rate);
+        if (due > outFrames + rate / 2) outFrames = due - rate / 100; // travou: nao manda rajada
+        if (due >= outFrames + rate / 200) {
+            size_t want = (size_t)(due - outFrames);
+            mix.assign(want * 2, 0);
+            for (auto& [pid, s] : srcs) {
+                if (!s.primed) continue;
+                size_t k = std::min(s.fifo.size(), want * 2);
+                for (size_t i = 0; i < k; i++) mix[i] += s.fifo[i];
+                s.fifo.erase(s.fifo.begin(), s.fifo.begin() + k);
+                if (s.fifo.empty()) s.primed = false; // parou de chegar: espera juntar folga de novo antes de voltar
+            }
+            pcm.resize(want * 2);
+            for (size_t i = 0; i < pcm.size(); i++) pcm[i] = (int16_t)std::clamp(mix[i], -32768, 32767);
+            writePacket(1, (const BYTE*)pcm.data(), (uint32_t)(pcm.size() * 2));
+            audioBytes += pcm.size() * 2;
+            outFrames += want;
+        }
+        Sleep(5);
+    }
+    for (auto& [pid, s] : srcs) {
+        if (envOn("GLV_AUDIO_DBG")) fprintf(stderr, "audio: dbg %ls amostras=%llu pico=%d\n", s.exe.c_str(), (unsigned long long)s.got, s.peak);
+        if (s.client) s.client->Stop();
+        if (s.evt) CloseHandle(s.evt);
+    }
+}
+
 struct AudioStats {
     double seconds = 0;
     int peak = 0;          // 0..32767
@@ -1759,7 +1924,16 @@ static int runStream(StreamOpts o) {
 
     // ---- audio: only from the captured window's process tree (or everything except one process)
     std::thread at;
-    if (o.pid || o.excludePid) {
+    // tela inteira com mais de um monitor: som so dos programas daquele monitor (GLV_AUDIO_ALL=1 volta ao "tudo menos o Discord")
+    if (!o.pid && o.excludePid && o.monitor >= 0 && (GetSystemMetrics(SM_CMONITORS) > 1 || envOn("GLV_AUDIO_MON")) && !envOn("GLV_AUDIO_ALL")) {
+        auto ms = listMonitors();
+        HMONITOR mon = o.monitor < (int)ms.size() ? ms[o.monitor].h : nullptr;
+        if (mon) at = std::thread([&, mon] {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            monitorAudioLoop(mon, o.excludePid, running, audioBytes);
+        });
+    }
+    if (!at.joinable() && (o.pid || o.excludePid)) {
         at = std::thread([&] {
             winrt::init_apartment(winrt::apartment_type::multi_threaded);
             ComPtr<IAudioClient> client;

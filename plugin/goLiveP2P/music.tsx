@@ -8,7 +8,7 @@ import { React, ReactDOM, useEffect, useRef, useState } from "@webpack/common";
 import { currentTrack, Track } from "./musicCore";
 import type { Found } from "./musicNative";
 import { Avatars, col, Controls, Cover, EASE, ellipsis, ensureCss, fmt, Grip, Heart, Icon, IconBtn, SeekBar, Volume, Wave } from "./musicParts";
-import { addLocalFiles, Bound, emit, isLocal, lyricsFor, plain, removeLocal, runSearch, S, sameLocal, saveLists, setView, subs, toggleLyrics, toTrack, View } from "./musicState";
+import { addLocalFiles, Bound, emit, isLocal, lyricsFor, plain, removeLocal, runSearch, S, sameLocal, saveLists, setListening, setView, subs, toggleLyrics, toTrack, View } from "./musicState";
 
 export { setListeners, startMusic, stopMusic } from "./musicState";
 
@@ -274,6 +274,7 @@ function Body({ b, compact, close }: { b: Bound; compact: boolean; close: () => 
             <>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 8px 6px 12px" }}>
                     <span style={{ fontWeight: 600, color: col.strong, fontSize: 13, flex: 1 }}>Musica</span>
+                    <JoinBtn />
                     <Avatars />
                     <IconBtn size={24} title="Fechar a janela (a musica continua)" onClick={close}><Icon n="x" size={14} /></IconBtn>
                 </div>
@@ -302,6 +303,7 @@ function Body({ b, compact, close }: { b: Bound; compact: boolean; close: () => 
         <>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 10px 10px 12px" }}>
                 <SearchBox b={b} />
+                <JoinBtn />
                 <Avatars />
                 <IconBtn size={26} title="Fechar a janela (a musica continua)" onClick={close}><Icon n="x" size={15} /></IconBtn>
             </div>
@@ -317,6 +319,20 @@ function Body({ b, compact, close }: { b: Bound; compact: boolean; close: () => 
                 <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 4 }}><LyricsBtn /><Volume width={90} /></div>
             </div>
         </>
+    );
+}
+
+/** Entrar ou sair da musica da chamada: so quem quer ouve. */
+function JoinBtn() {
+    const on = S.listening;
+    const [h, setH] = useState(false);
+    return (
+        <button
+            onClick={() => setListening(!on)} onMouseEnter={() => setH(true)} onMouseLeave={() => setH(false)}
+            title={on ? "Parar de ouvir a musica da chamada (so para voce)" : "Ouvir a musica da chamada junto com a galera"}
+            style={{ all: "unset", cursor: "pointer", flex: "none", padding: "5px 12px", borderRadius: 14, fontSize: 13, fontWeight: 600, transition: EASE,
+                color: "#fff", background: on ? (h ? "rgba(255,255,255,.16)" : "rgba(255,255,255,.08)") : (h ? "#1f8b4c" : col.green) }}
+        >{on ? "Sair" : "Ouvir junto"}</button>
     );
 }
 
@@ -489,12 +505,12 @@ export function MusicButton() {
             <div style={{ position: "relative", display: "flex", alignItems: "center", padding: 4, borderRadius: 12, background: "var(--background-base-lowest, rgba(30,31,34,.9))" }}>
                 <button
                     ref={btn} className="pdl-b"
-                    title="Musica na chamada (pdLink)" aria-label="Musica na chamada"
+                    title={playing && !S.listening ? "Tem musica tocando na chamada: clique para ouvir junto" : "Musica na chamada (pdLink)"} aria-label="Musica na chamada"
                     onClick={e => { e.stopPropagation(); setOpen(!on); }}
                     onMouseEnter={() => setH(true)} onMouseLeave={() => setH(false)}
                     style={{ all: "unset", cursor: "pointer", width: 40, height: 40, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", color: on || h ? "#fff" : "var(--interactive-normal, #b5bac1)", background: on ? col.brand : h ? "rgba(255,255,255,.08)" : "transparent", transition: EASE }}
                 ><Icon n="fone" size={22} /></button>
-                {playing && !S.open && <span className="pdl-pop" style={{ position: "absolute", top: 2, right: 2, width: 10, height: 10, borderRadius: 5, background: col.green, border: "2px solid #1e1f22" }} />}
+                {playing && !S.open && <span className="pdl-pop" style={{ position: "absolute", top: 2, right: 2, width: 10, height: 10, borderRadius: 5, background: S.listening ? col.green : "#f0b232", border: "2px solid #1e1f22" }} />}
             </div>
             {S.open && target && btn.current && <Window anchor={btn.current} target={target} closing={closing} close={() => setOpen(false)} />}
         </div>

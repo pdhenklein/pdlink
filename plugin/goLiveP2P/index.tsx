@@ -3,7 +3,9 @@ import { copyWithToast } from "@utils/discord";
 import { ModalRoot, ModalSize, openModal } from "@utils/modal";
 import { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import definePlugin, { PluginNative } from "@utils/types";
-import { ContextMenuApi, Menu, ScrollerThin, SelectedChannelStore, UserStore, useEffect, useRef, useState } from "@webpack/common";
+import { ContextMenuApi, Menu, Popout, ScrollerThin, SelectedChannelStore, UserStore, useEffect, useRef, useState } from "@webpack/common";
+import { findComponentByCodeLazy } from "@webpack";
+import ErrorBoundary from "@components/ErrorBoundary";
 
 import { FilesButton } from "./files";
 import { MusicButton } from "./music";
@@ -388,39 +390,58 @@ const FG_MULTS = [
     { m: 4, label: "4x" }
 ];
 
-// Menu da live de outra pessoa (botao direito no quadro): onde o som dela toca e o tratamento da imagem
+// Botao na barra do topo do Discord (ao lado dos icones de caixa de entrada e ajuda): tratamento da imagem das lives que eu assisto
+const HeaderBarIcon = findComponentByCodeLazy(".HEADER_BAR_BADGE_BOTTOM,", 'position:"bottom"');
+
+function ViewIcon() {
+    return (
+        <svg viewBox="0 0 24 24" width={20} height={20} style={{ color: "var(--interactive-icon-default)" }}>
+            <path fill="currentColor" d="M12 5c-5 0-9 4.5-10 7 1 2.5 5 7 10 7s9-4.5 10-7c-1-2.5-5-7-10-7Zm0 11.5A4.5 4.5 0 1 1 12 7.5a4.5 4.5 0 0 1 0 9Zm0-7a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5ZM19 1l.7 1.8L21.5 3.5l-1.8.7L19 6l-.7-1.8-1.8-.7 1.8-.7z" />
+        </svg>
+    );
+}
+
+function ViewMenu({ onClose }: { onClose: () => void; }) {
+    const [, redraw] = useState(0);
+    const pick = (fn: () => void) => () => { fn(); applyViewFilter(); redraw(n => n + 1); };
+    return (
+        <Menu.Menu navId="pdlink-view" onClose={onClose} aria-label="Imagem das lives">
+            <Menu.MenuGroup label="Limpeza e nitidez">
+                {VIEW_FILTERS.map(f => (
+                    <Menu.MenuRadioItem key={f.id} group="pdlink-view-filter-g" id={"pdlink-view-" + f.id} label={f.label}
+                        checked={settings.store.viewFilter === f.id} action={pick(() => { settings.store.viewFilter = f.id; })} />
+                ))}
+            </Menu.MenuGroup>
+            <Menu.MenuGroup label="Geração de quadros">
+                {FG_MULTS.map(o => (
+                    <Menu.MenuRadioItem key={o.m} group="pdlink-view-fg-g" id={"pdlink-fg-" + o.m} label={o.label}
+                        checked={(settings.store.viewFg || 1) === o.m} action={pick(() => { settings.store.viewFg = o.m; })} />
+                ))}
+            </Menu.MenuGroup>
+        </Menu.Menu>
+    );
+}
+
+function ViewButton() {
+    const ref = useRef(null);
+    const [show, setShow] = useState(false);
+    return (
+        <Popout position="bottom" align="right" animation={Popout.Animation.NONE} shouldShow={show}
+            onRequestClose={() => setShow(false)} targetElementRef={ref} renderPopout={() => <ViewMenu onClose={() => setShow(false)} />}>
+            {(_, { isShown }) => (
+                <HeaderBarIcon ref={ref} className="pdlink-view-btn" onClick={() => setShow(v => !v)}
+                    tooltip={isShown ? null : "pdLink: imagem das lives"} icon={ViewIcon} selected={isShown} />
+            )}
+        </Popout>
+    );
+}
+
+// Menu da live de outra pessoa (botao direito no quadro): onde o som dela toca
 const streamContext: NavContextMenuPatchCallback = (children, { stream }: { stream?: { ownerId?: string; }; }) => {
     const owner = stream?.ownerId;
     if (!owner || owner === UserStore.getCurrentUser()?.id || !getLiveEntry(owner)) return;
     children.push(
         <Menu.MenuSeparator />,
-        <Menu.MenuItem id="pdlink-view-filter" label="Limpeza e nitidez da imagem">
-            {VIEW_FILTERS.map(f => (
-                <Menu.MenuRadioItem
-                    key={f.id} group="pdlink-view-filter-g" id={"pdlink-view-" + f.id} label={f.label}
-                    checked={settings.store.viewFilter === f.id}
-                    action={() => {
-                        settings.store.viewFilter = f.id;
-                        applyViewFilter();
-                        // o menu do Discord so se redesenha quando o mouse sai do item: fecha para nao mostrar a marca antiga
-                        ContextMenuApi.closeContextMenu();
-                    }}
-                />
-            ))}
-        </Menu.MenuItem>,
-        <Menu.MenuItem id="pdlink-view-fg" label="Geração de quadros">
-            {FG_MULTS.map(o => (
-                <Menu.MenuRadioItem
-                    key={o.m} group="pdlink-view-fg-g" id={"pdlink-fg-" + o.m} label={o.label}
-                    checked={(settings.store.viewFg || 1) === o.m}
-                    action={() => {
-                        settings.store.viewFg = o.m;
-                        applyViewFilter();
-                        ContextMenuApi.closeContextMenu();
-                    }}
-                />
-            ))}
-        </Menu.MenuItem>,
         <Menu.MenuCheckboxItem
             id="pdlink-live-output-default"
             label="Som da live na saída padrão do Windows"
@@ -475,6 +496,14 @@ export default definePlugin({
     contextMenus: { "stream-context": streamContext },
 
     patches: [
+        {
+            // Barra do topo (mesmo ponto que o Vencord Toolbox usa; aceita o Toolbox ligado junto)
+            find: '?"BACK_FORWARD_NAVIGATION":',
+            replacement: {
+                match: /(trailing:.{0,50}?(?:\i\.Fragment|Vencord\.Plugins\.plugins\["VencordToolbox"\]\.TrailingWrapper),\{children:\[)/,
+                replace: "$1$self.renderViewButton(),"
+            }
+        },
         {
             // Botao de arquivos na barra de controles da chamada, a esquerda dos botoes do Discord (microfone, camera...).
             // A barra fica dentro da tela cheia, entao o botao tambem aparece la.
@@ -593,6 +622,10 @@ export default definePlugin({
 
     renderFilesButton() {
         return <><MusicButton /><FilesButton /></>;
+    },
+
+    renderViewButton() {
+        return <ErrorBoundary key="pdlink-view" noop><ViewButton /></ErrorBoundary>;
     },
 
     start() {

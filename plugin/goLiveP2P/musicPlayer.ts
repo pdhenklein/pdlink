@@ -40,6 +40,8 @@ export class MusicPlayer {
     private route: Route | null = null;
     private vol = 1;
     private mute = false;
+    /** fora da musica: nao baixa nem toca nada aqui (so continua mandando a musica do meu PC para quem esta ouvindo) */
+    private listening = true;
 
     /**
      * @param load devolve um endereco tocavel (blob:) para a musica, ou lanca erro
@@ -67,13 +69,15 @@ export class MusicPlayer {
     }
 
     private applyVolume() {
-        const v = this.mute ? 0 : this.vol;
+        const off = this.mute || !this.listening;
+        const v = off ? 0 : this.vol;
         if (this.route) this.route.monitor.gain.value = v;
-        else { this.audio.volume = this.vol; this.audio.muted = this.mute; }
-        this.live.volume = this.vol; this.live.muted = this.mute;
+        else { this.audio.volume = this.vol; this.audio.muted = off; }
+        this.live.volume = this.vol; this.live.muted = off;
     }
     setVolume(v: number) { this.vol = Math.max(0, Math.min(1, v)); this.applyVolume(); }
     setMuted(m: boolean) { this.mute = m; this.applyVolume(); }
+    setListening(on: boolean) { this.listening = on; this.applyVolume(); this.reconcile(); }
 
     /**
      * Liga a saida para a transmissao. Depois disso o som do player passa por aqui:
@@ -111,7 +115,7 @@ export class MusicPlayer {
     /** baixa a proxima da fila antes da hora, para a troca sair sem buraco */
     private preloadNext() {
         const s = this.sync.state;
-        const nxt = s.cur ? s.queue[1] : null;
+        const nxt = s.cur && this.listening ? s.queue[1] : null;
         if (nxt && !this.urls.has(nxt.id) && !this.hooks.remote?.(nxt)) this.fetchTrack(nxt).catch(() => { });
         // solta da memoria o que saiu da fila
         const alive = new Set(s.queue.map(t => t.id));
@@ -146,7 +150,16 @@ export class MusicPlayer {
             this.setStatus("");
             return;
         }
-        const inc = this.hooks.remote?.(t) ?? null;
+        if (!this.listening && !this.hooks.sending?.(t)) {
+            // saiu da musica: para tudo aqui e nao baixa nada (a fila continua aparecendo)
+            if (!a.paused) a.pause();
+            this.loadedId = ""; this.loadingId = "";
+            this.playLive(null);
+            this.setSending(false);
+            this.setStatus("");
+            return;
+        }
+        const inc = this.listening ? this.hooks.remote?.(t) ?? null : null;
         if (inc) {
             // musica do PC de outra pessoa: o tempo e o som sao de quem colocou
             if (!a.paused) a.pause();

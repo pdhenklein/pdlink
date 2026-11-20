@@ -30,6 +30,8 @@ export const S = {
     open: false,
     volume: 0.6,
     muted: false,
+    /** estou ouvindo a musica desta chamada? Comeca fora; quem coloca musica entra sozinho. */
+    listening: false,
     history: [] as Found[],
     liked: [] as Found[],
     playlists: [] as Playlist[],
@@ -278,6 +280,11 @@ export async function startMusic(hub: Hub, myId: string, nameOf: (id: string) =>
         latency: () => server?.latency() ?? 0
     });
     b = { sync, player, myId, nameOf, hub };
+    // cada chamada comeca fora da musica; colocar uma musica ja entra
+    S.listening = false;
+    player.setListening(false);
+    const doAction = sync.do.bind(sync);
+    sync.do = a => { if (a.t === "add") setListening(true); return doAction(a); };
     hub.onMusic = text => sync.receive(text);
     hub.onMusicSignal = m => onSignal(b, m);
     sync.onChange = s => {
@@ -314,6 +321,15 @@ export function stopMusic() {
     allowed = () => false;
     lastCur = "";
     S.listeners = [];
+    emit();
+}
+
+/** Entrar ou sair da musica da chamada (so para mim; a fila continua igual para todos). */
+export function setListening(on: boolean) {
+    if (S.listening === on) return;
+    S.listening = on;
+    S.bound?.player.setListening(on);
+    plog(`musica: ${on ? "entrei para ouvir" : "sai da musica"}`);
     emit();
 }
 
