@@ -3,6 +3,7 @@
  */
 
 import * as DataStore from "@api/DataStore";
+import { showNotification } from "@api/Notifications";
 import { PluginNative } from "@utils/types";
 
 import { plog } from "./logger";
@@ -10,6 +11,7 @@ import { currentTrack, MusicSync, SPOTIFY_TRACK, Track } from "./musicCore";
 import { MusicClient, MusicServer } from "./musicLink";
 import type { Found, Lyrics } from "./musicNative";
 import { MusicPlayer } from "./musicPlayer";
+import { settings } from "./settings";
 import { type Hub, ICE } from "./p2p";
 
 const Native = VencordNative.pluginHelpers.pdLink as PluginNative<typeof import("./native")>;
@@ -287,11 +289,31 @@ export async function startMusic(hub: Hub, myId: string, nameOf: (id: string) =>
     sync.do = a => { if (a.t === "add") setListening(true); return doAction(a); };
     hub.onMusic = text => sync.receive(text);
     hub.onMusicSignal = m => onSignal(b, m);
+    // avisos: nos primeiros segundos chega a fila que ja existia na chamada, isso nao e novidade
+    const startedAt = Date.now();
+    const known = new Set<string>();
     sync.onChange = s => {
-        if (s.cur !== lastCur) {
+        const settled = Date.now() - startedAt > 4000;
+        const added = s.queue.filter(t => !known.has(t.id));
+        for (const t of added) known.add(t.id);
+        const curChanged = s.cur !== lastCur;
+        if (curChanged) {
             lastCur = s.cur;
             const t = currentTrack(s);
-            if (t) { remember(t); plog(`musica: tocando "${t.title}"${isLocal(t) ? " (do PC)" : ""}`); }
+            if (t) {
+                remember(t);
+                plog(`musica: tocando "${t.title}"${isLocal(t) ? " (do PC)" : ""}`);
+                // musica que eu mesmo acabei de colocar e ja comecou: eu sei, nao precisa avisar
+                if (settled && !(t.by === myId && added.some(a => a.id === t.id)))
+                    notifyMusic("Tocando agora", `${t.title}${t.artist ? " - " + t.artist : ""}${t.by && t.by !== myId ? ` (colocada por ${nameOf(t.by)})` : ""}`, t.img);
+            }
+        }
+        // musica nova que ja virou a "tocando agora" ja foi avisada acima
+        const fromOthers = added.filter(t => t.by !== myId && !(curChanged && t.id === s.cur));
+        if (settled && fromOthers.length) {
+            const f = fromOthers[0];
+            notifyMusic(`${nameOf(f.by) || "Alguem"} colocou ${fromOthers.length > 1 ? fromOthers.length + " musicas" : "uma musica"}`,
+                fromOthers.length > 1 ? `${f.title} e mais ${fromOthers.length - 1}` : `${f.title}${f.artist ? " - " + f.artist : ""}`, f.img);
         }
         pruneClients(b);
         // a musica do meu PC saiu da fila: para de mandar som na hora
@@ -322,6 +344,16 @@ export function stopMusic() {
     lastCur = "";
     S.listeners = [];
     emit();
+}
+
+/** Aviso no canto do Discord (desliga em Avisos da musica, nas opcoes do plugin). Com a janela aberta nao precisa. */
+function notifyMusic(title: string, body: string, img: string) {
+    if (!settings.store.musicNotify || S.open) return;
+    const join = !S.listening ? " Clique para ouvir junto." : "";
+    showNotification({
+        title, body: body + join, icon: img || undefined, noPersist: true,
+        onClick: () => { S.open = true; emit(); }
+    });
 }
 
 /** Entrar ou sair da musica da chamada (so para mim; a fila continua igual para todos). */

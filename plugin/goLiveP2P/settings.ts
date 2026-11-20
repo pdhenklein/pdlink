@@ -8,6 +8,7 @@ import { VersionInfo } from "./versionInfo";
 // Sao opcoes ocultas: nao aparecem na tela de plugins, so guardam o que a pessoa escolheu.
 export const settings = definePluginSettings({
     version: { type: OptionType.COMPONENT, component: VersionInfo },
+    musicNotify: { type: OptionType.BOOLEAN, description: "Avisar quando alguem colocar uma musica na chamada e quando a musica mudar", default: true },
     markColor: { type: OptionType.STRING, description: "Cor do ping e do desenho", default: "#3b82f6", hidden: true },
     markWidth: { type: OptionType.NUMBER, description: "Espessura do traco", default: 6, hidden: true },
     preset: { type: OptionType.STRING, description: "Modo de transmissao", default: "custom", hidden: true },
