@@ -19,7 +19,7 @@ const hasNative = () => typeof (Native as any)?.musicFetch === "function";
 
 export interface Listener { id: string; name: string; }
 export interface Playlist { name: string; items: Found[]; }
-export type View = "fila" | "busca" | "pc" | "historico" | "curtidas" | "playlists";
+export type View = "fila" | "busca" | "pc" | "historico" | "curtidas" | "playlists" | "conta";
 export interface SearchState { busy: boolean; error: string; items: Found[]; query: string; }
 export interface Bound { sync: MusicSync; player: MusicPlayer; myId: string; nameOf: (id: string) => string; hub: Hub; }
 /** Musica do meu PC: o arquivo so existe aqui, enquanto o Discord estiver aberto. */
@@ -285,6 +285,7 @@ export async function startMusic(hub: Hub, myId: string, nameOf: (id: string) =>
     // cada chamada comeca fora da musica; colocar uma musica ja entra
     S.listening = false;
     player.setListening(false);
+    hub.setMusicListening(false);
     const doAction = sync.do.bind(sync);
     sync.do = a => { if (a.t === "add") setListening(true); return doAction(a); };
     hub.onMusic = text => sync.receive(text);
@@ -361,11 +362,14 @@ export function setListening(on: boolean) {
     if (S.listening === on) return;
     S.listening = on;
     S.bound?.player.setListening(on);
+    S.bound?.hub.setMusicListening(on);
     plog(`musica: ${on ? "entrei para ouvir" : "sai da musica"}`);
     emit();
 }
 
-/** Quem esta na chamada com o mod (ouve a musica junto). */
+export const musicListening = () => S.listening;
+
+/** Quem esta ouvindo a musica da chamada agora. */
 export function setListeners(list: Listener[]) { S.listeners = list; emit(); }
 
 export async function runSearch(b: Bound, query: string) {

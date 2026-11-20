@@ -3,7 +3,7 @@ import { ChannelStore, GuildMemberStore, RelationshipStore, SelectedChannelStore
 import { createMarkSession, dropMarkSession, notifyMarkSessions, registerMarkSession } from "./marks";
 import { type Mark } from "./marksCore";
 import { bindFiles, handleOffer, type Peer, setPeers } from "./files";
-import { setListeners, startMusic, stopMusic } from "./music";
+import { musicListening, setListeners, startMusic, stopMusic } from "./music";
 import { pickFullName, pickName } from "./names";
 import { PluginNative } from "@utils/types";
 
@@ -69,7 +69,11 @@ async function refreshPeers() {
     if (hub === h) {
         setPeers(list);
         const self = me();
-        setListeners(self ? [{ id: self, name: fullName(self) }, ...list] : list);
+        // "Ouvindo" mostra so quem entrou na musica (eu, se cliquei em Ouvir junto, e quem avisou que esta ouvindo)
+        const hearing: Peer[] = [];
+        for (const p of list) if (h.modListening.get(await hashOf(p.id)) !== false) hearing.push(p);
+        if (hub !== h) return;
+        setListeners(self && musicListening() ? [{ id: self, name: fullName(self) }, ...hearing] : hearing);
     }
 }
 

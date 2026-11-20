@@ -1,14 +1,14 @@
 import { randomBytes } from "crypto";
 import { execFile, spawn } from "child_process";
 import { ConnectSrc, CspPolicies, ImageSrc } from "@main/csp";
-import { app, IpcMainInvokeEvent } from "electron";
+import { app, IpcMainInvokeEvent, shell } from "electron";
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from "fs";
 import { createServer, Server, ServerResponse } from "http";
 import { tmpdir } from "os";
 import { join } from "path";
 
 import { closeAll, closeFile, openFile, reveal, saveDialog, writeFile } from "./fileNative";
-import { musicClean, musicClock as mClock, musicFetch as mFetch, musicInit, musicLyrics as mLyrics, musicResolve as mResolve, musicSearch as mSearch } from "./musicNative";
+import { defaultBrowser, musicBrowser, musicCheckLogin, musicClean, musicClock as mClock, musicFetch as mFetch, musicInit, musicLyrics as mLyrics, musicResolve as mResolve, musicSearch as mSearch } from "./musicNative";
 import { overlayInfo, sendOverlay, showToast, startOverlay, stopOverlay } from "./overlay";
 import { discordUpdateExe, relaunchAfterExit } from "./updateRestart";
 
@@ -323,6 +323,15 @@ musicInit(PACKAGED ? join(PKG_DIR, "..", "music") : "F:/Discord2/probe/music", t
 setTimeout(musicClean, 30000); setInterval(musicClean, 6 * 3600 * 1000);
 export function musicSearch(_: IpcMainInvokeEvent, query: string) { return mSearch(query); }
 export function musicFetch(_: IpcMainInvokeEvent, ref: string) { return mFetch(String(ref)); }
+export function musicSetBrowser(_: IpcMainInvokeEvent, b: string) { musicBrowser(String(b ?? "")); }
+// Entrar com o YouTube: abre a pagina de login no navegador padrao (a pessoa entra la mesmo) e passa a usar esse navegador
+export async function musicYtLogin(_: IpcMainInvokeEvent) {
+    const b = await defaultBrowser();
+    if (b) musicBrowser(b);
+    await shell.openExternal("https://accounts.google.com/ServiceLogin?service=youtube&continue=https%3A%2F%2Fwww.youtube.com%2F");
+    return b;
+}
+export function musicYtCheck(_: IpcMainInvokeEvent) { return musicCheckLogin(); }
 export function musicClock(_: IpcMainInvokeEvent) { return mClock(); }
 export function musicResolve(_: IpcMainInvokeEvent, ref: string, title: string, artist: string, dur: number) { return mResolve(String(ref ?? "").slice(0, 400), String(title ?? "").slice(0, 300), String(artist ?? "").slice(0, 200), Number(dur) || 0); }
 export function musicLyrics(_: IpcMainInvokeEvent, title: string, artist: string, dur: number) { return mLyrics(String(title ?? "").slice(0, 300), String(artist ?? "").slice(0, 200), Number(dur) || 0); }

@@ -230,7 +230,18 @@ export class Hub {
     onFileOffer: (fromId: string, offer: FileOffer) => void = () => { };
     /** Quem na chamada tem o mod (hash do usuario -> ultima vez visto). */
     mods = new Map<string, number>();
+    /** quem esta ouvindo a musica da chamada (versoes sem esse aviso ouviam sempre: contam como ouvindo) */
+    modListening = new Map<string, boolean>();
+    private musicListening = false;
     onMods: () => void = () => { };
+
+    /** Entrei ou sai da musica: avisa a chamada na hora (vai junto do aviso de que tenho o mod). */
+    setMusicListening(on: boolean) {
+        if (this.musicListening === on) return;
+        this.musicListening = on;
+        this.announceMod();
+        this.onMods();
+    }
     private modTopic = "";
     private filesTopic = "";
     private modTimer: any = null;
@@ -325,18 +336,22 @@ export class Hub {
 
     /** Avisa a chamada que eu tenho o mod (renovado a cada 20 s; some sozinho se o Discord fechar). */
     private announceMod() {
-        this.mqtt?.publish(this.modTopic, JSON.stringify({ at: Date.now() }), true);
+        this.mqtt?.publish(this.modTopic, JSON.stringify({ at: Date.now(), mu: this.musicListening }), true);
     }
 
     private onModMsg(topic: string, payload: string) {
         const hash = topic.split("/").pop()!;
         if (!payload) { if (this.mods.delete(hash)) this.onMods(); return; }
         try {
-            const at = Number(JSON.parse(payload).at) || 0;
+            const o = JSON.parse(payload);
+            const at = Number(o.at) || 0;
+            const mu = o.mu !== false;
+            const muChanged = this.modListening.get(hash) !== mu;
+            this.modListening.set(hash, mu);
             if (Date.now() - at > 70000) { if (this.mods.delete(hash)) this.onMods(); return; }
             const had = this.mods.has(hash);
             this.mods.set(hash, at);
-            if (!had) this.onMods();
+            if (!had || muChanged) this.onMods();
         } catch { }
     }
 

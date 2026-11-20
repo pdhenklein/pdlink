@@ -8,6 +8,19 @@ import { VersionInfo } from "./versionInfo";
 // Sao opcoes ocultas: nao aparecem na tela de plugins, so guardam o que a pessoa escolheu.
 export const settings = definePluginSettings({
     version: { type: OptionType.COMPONENT, component: VersionInfo },
+    ytBrowser: {
+        type: OptionType.SELECT,
+        description: "Musica do YouTube com a sua conta: o pdLink usa o login do YouTube deste navegador quando o YouTube pedir para confirmar que voce nao e um robo (o Firefox funciona melhor; Chrome e Edge podem nao deixar)",
+        options: [
+            { label: "Desligado (sem conta)", value: "", default: true },
+            { label: "Firefox", value: "firefox" },
+            { label: "Microsoft Edge", value: "edge" },
+            { label: "Google Chrome", value: "chrome" },
+            { label: "Brave", value: "brave" },
+            { label: "Opera", value: "opera" }
+        ],
+        onChange: (v: string) => { (VencordNative.pluginHelpers.pdLink as any)?.musicSetBrowser?.(v).catch?.(() => { }); }
+    },
     musicNotify: { type: OptionType.BOOLEAN, description: "Avisar quando alguem colocar uma musica na chamada e quando a musica mudar", default: true },
     markColor: { type: OptionType.STRING, description: "Cor do ping e do desenho", default: "#3b82f6", hidden: true },
     markWidth: { type: OptionType.NUMBER, description: "Espessura do traco", default: 6, hidden: true },

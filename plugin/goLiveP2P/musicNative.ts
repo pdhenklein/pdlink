@@ -14,6 +14,39 @@ let note: (text: string) => void = () => { };
 export function musicInit(musicDir: string, log: (text: string) => void) { dir = musicDir; note = log; }
 
 const exe = () => join(dir, "yt-dlp.exe");
+
+// Login do YouTube: a pessoa escolhe (nas opcoes) o navegador onde ja esta logada; o yt-dlp usa essa sessao.
+// Desligado por padrao. So nomes desta lista chegam ao yt-dlp.
+const BROWSERS = new Set(["firefox", "edge", "chrome", "brave", "opera"]);
+let browser = "";
+export function musicBrowser(b: string) {
+    const v = BROWSERS.has(b) ? b : "";
+    if (v !== browser) note(`musica: conta do YouTube ${v ? "do navegador " + v : "desligada"}`);
+    browser = v;
+}
+
+/** Navegador padrao do Windows (o que abre links), em nome que o yt-dlp entende; "" se for outro. */
+export function defaultBrowser(): Promise<string> {
+    return new Promise(res => {
+        execFile("reg", ["query", "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\https\\UserChoice", "/v", "ProgId"], { windowsHide: true, timeout: 10000, encoding: "utf8" }, (e, out) => {
+            const id = e ? "" : (/ProgId\s+REG_SZ\s+(\S+)/i.exec(String(out))?.[1] ?? "");
+            res(/^Firefox/i.test(id) ? "firefox" : /^MSEdge/i.test(id) ? "edge" : /^Chrome/i.test(id) ? "chrome" : /^Brave/i.test(id) ? "brave" : /^Opera/i.test(id) ? "opera" : "");
+        });
+    });
+}
+
+/** O login funcionou? Pede o historico da conta (so abre logado), 1 item, sem baixar nada. */
+export async function musicCheckLogin(): Promise<{ ok: true; } | { ok: false; error: string; }> {
+    if (!browser) return { ok: false, error: "nenhum navegador escolhido" };
+    try {
+        await ensureTool();
+        await run(["--flat-playlist", "-I", "1", "--print", "id", ":ythistory"], 60000);
+        return { ok: true };
+    } catch (e: any) {
+        const m = String(e?.message ?? e);
+        return { ok: false, error: /login|sign in|cookies? .*(no|not)|history/i.test(m) && !/robo|navegador/.test(m) ? "o login ainda nao aparece nesse navegador. Termine de entrar no YouTube por la e clique em Pronto de novo" : m };
+    }
+}
 const cacheDir = () => join(dir, "cache");
 const YTDLP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 
@@ -58,8 +91,19 @@ function selfUpdate() {
 
 function run(args: string[], timeout: number) {
     return new Promise<string>((res, rej) => {
-        execFile(exe(), ["--no-warnings", "--no-config", "--ignore-config", "--use-extractors", "default,-generic", ...args], { windowsHide: true, timeout, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (e, out, err) => {
-            if (e) rej(new Error((String(err).trim().split("\n").filter(l => /ERROR/.test(l)).pop() ?? String(e.message)).replace(/^ERROR:\s*/, "").slice(0, 200)));
+        const login = browser ? ["--cookies-from-browser", browser] : [];
+        execFile(exe(), ["--no-warnings", "--no-config", "--ignore-config", "--use-extractors", "default,-generic", ...login, ...args], { windowsHide: true, timeout, maxBuffer: 64 * 1024 * 1024, encoding: "utf8" }, (e, out, err) => {
+            if (e) {
+                const raw = (String(err).trim().split("\n").filter(l => /ERROR/.test(l)).pop() ?? String(e.message)).replace(/^ERROR:\s*/, "");
+                // o YouTube as vezes bloqueia downloads de uma internet por um tempo ("confirme que voce nao e um robo")
+                rej(new Error(/not a bot|Sign in to confirm/i.test(raw)
+                    ? (browser
+                        ? "o YouTube pediu login de novo: abra o YouTube no " + browser + " e confira se o login esta ativo, ou tente outro navegador nas opcoes do pdLink"
+                        : "o YouTube bloqueou por um tempo os downloads desta internet. Tente mais tarde, use SoundCloud, Suno ou musica do PC, ou ligue \"Musica do YouTube com a sua conta\" nas opcoes do pdLink")
+                    : /cookie|decrypt|DPAPI|could not find .* database|Could not copy/i.test(raw)
+                        ? "nao consegui usar o login do " + browser + ". Feche esse navegador e tente de novo, ou escolha o Firefox nas opcoes do pdLink"
+                        : raw.slice(0, 200)));
+            }
             else res(String(out));
         });
     });

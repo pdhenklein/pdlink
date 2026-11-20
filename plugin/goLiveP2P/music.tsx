@@ -9,8 +9,9 @@ import { currentTrack, Track } from "./musicCore";
 import type { Found } from "./musicNative";
 import { Avatars, col, Controls, Cover, EASE, ellipsis, ensureCss, fmt, Grip, Heart, Icon, IconBtn, SeekBar, Volume, Wave } from "./musicParts";
 import { addLocalFiles, Bound, emit, isLocal, lyricsFor, plain, removeLocal, runSearch, S, sameLocal, saveLists, setListening, setView, subs, toggleLyrics, toTrack, View } from "./musicState";
+import { settings } from "./settings";
 
-export { setListeners, startMusic, stopMusic } from "./musicState";
+export { musicListening, setListeners, startMusic, stopMusic } from "./musicState";
 
 function useMusic() {
     const [, force] = useState(0);
@@ -179,6 +180,58 @@ function ListRow({ name, count, img, onOpen, onDelete }: { name: string; count: 
 }
 
 /** Aba "Do PC": arquivos de musica deste PC. O arquivo fica aqui; a chamada ouve o som transmitido por mim. */
+const BROWSER_NAMES: Record<string, string> = { firefox: "Firefox", edge: "Microsoft Edge", chrome: "Google Chrome", brave: "Brave", opera: "Opera" };
+const NativeMusic = VencordNative.pluginHelpers.pdLink as any;
+
+/** Conta do YouTube: entrar pelo navegador padrao para o YouTube parar de pedir "confirme que voce nao e um robo". */
+function Account() {
+    const [step, setStep] = useState<"" | "abriu" | "testando">("");
+    const [msg, setMsg] = useState<{ ok: boolean; text: string; } | null>(null);
+    const cur = settings.store.ytBrowser ?? "";
+    const use = (b: string) => { settings.store.ytBrowser = b; NativeMusic.musicSetBrowser?.(b); };
+    const login = async () => {
+        setMsg(null);
+        const b: string = await NativeMusic.musicYtLogin();
+        if (!b) { setMsg({ ok: false, text: "Nao reconheci o seu navegador padrao. Escolha abaixo em qual navegador voce entrou." }); setStep("abriu"); return; }
+        use(b);
+        setStep("abriu");
+    };
+    const check = async () => {
+        setStep("testando");
+        const r = await NativeMusic.musicYtCheck();
+        setStep("");
+        setMsg(r.ok ? { ok: true, text: "Pronto! As musicas do YouTube agora usam a sua conta." } : { ok: false, text: r.error });
+    };
+    const btn = (label: string, onClick: () => void, primary?: boolean) => (
+        <button className="pdl-b" onClick={onClick} style={{ ...pill, color: "#fff", background: primary ? col.brand : "rgba(255,255,255,.08)" }}>{label}</button>
+    );
+    return (
+        <div style={{ padding: "6px 8px", display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ color: col.strong, fontWeight: 600, fontSize: 14 }}>Conta do YouTube</div>
+            <div style={{ color: col.muted, fontSize: 12, lineHeight: 1.5 }}>
+                Se o YouTube pedir para confirmar que voce nao e um robo, entre com a sua conta. O login abre no seu navegador e fica so neste PC: o pdLink nunca ve a sua senha.
+            </div>
+            <div style={{ fontSize: 13, color: cur ? col.green : col.muted }}>
+                {cur ? `Usando o login do ${BROWSER_NAMES[cur] ?? cur}` : "Sem conta (desligado)"}
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {step === "abriu"
+                    ? <>{btn("Pronto, ja entrei", check, true)}{btn("Abrir de novo", login)}</>
+                    : step === "testando" ? <span style={{ color: col.muted, fontSize: 13 }}>Conferindo o login...</span>
+                        : <>{btn(cur ? "Entrar de novo" : "Entrar com o YouTube", login, true)}{cur && btn("Desligar", () => { use(""); setMsg(null); })}</>}
+            </div>
+            {step === "abriu" && <div style={{ color: col.muted, fontSize: 12 }}>Entre na sua conta na pagina que abriu no navegador e depois clique em "Pronto, ja entrei".</div>}
+            {msg && <div style={{ fontSize: 12, color: msg.ok ? col.green : col.red }}>{msg.text}</div>}
+            <div style={{ color: col.muted, fontSize: 11, marginTop: 4 }}>Entrou em outro navegador?</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {Object.entries(BROWSER_NAMES).map(([id, name]) => (
+                    <button key={id} className="pdl-b" onClick={() => { use(id); setMsg(null); }} style={{ ...pill, fontSize: 12, color: cur === id ? "#fff" : col.text, background: cur === id ? col.brand : "rgba(255,255,255,.05)" }}>{name}</button>
+                ))}
+            </div>
+        </div>
+    );
+}
+
 function LocalFiles({ b }: { b: Bound; }) {
     const input = useRef<HTMLInputElement>(null);
     const [drag, setDrag] = useState(false);
@@ -244,7 +297,7 @@ function NowLine({ b }: { b: Bound; }) {
 }
 
 const scroll: React.CSSProperties = { overflowY: "auto", minHeight: 0, flex: 1 };
-const TABS: [View, string, string][] = [["fila", "fila", "Fila"], ["busca", "busca", "Busca"], ["pc", "pc", "Do PC"], ["historico", "historico", "Historico"], ["curtidas", "coracao", "Curtidas"], ["playlists", "playlist", "Playlists"]];
+const TABS: [View, string, string][] = [["fila", "fila", "Fila"], ["busca", "busca", "Busca"], ["pc", "pc", "Do PC"], ["historico", "historico", "Historico"], ["curtidas", "coracao", "Curtidas"], ["playlists", "playlist", "Playlists"], ["conta", "conta", "Conta"]];
 
 function Tab({ v, icon, label, compact }: { v: View; icon: string; label: string; compact: boolean; }) {
     const [h, setH] = useState(false);
@@ -264,7 +317,7 @@ function Body({ b, compact, close }: { b: Bound; compact: boolean; close: () => 
             : v === "pc" ? <LocalFiles b={b} />
             : v === "historico" ? <Results b={b} items={S.history} empty="As musicas que tocarem aparecem aqui." />
                 : v === "curtidas" ? <Results b={b} items={S.liked} empty="Clique no coracao de uma musica para guardar aqui." bulk />
-                    : <Playlists b={b} />;
+                    : v === "conta" ? <Account /> : <Playlists b={b} />;
     const tabs = TABS.map(([tv, icon, label]) => <Tab key={tv} v={tv} icon={icon} label={label} compact={compact} />);
     // a troca de aba entra com um fade
     const shown = <div key={v + (se.busy ? "b" : "")} className="pdl-view">{list}</div>;

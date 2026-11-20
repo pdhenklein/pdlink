@@ -548,6 +548,7 @@ export default definePlugin({
     start() {
         migrateLegacySettings();
         applyViewFilter();
+        Native.musicSetBrowser?.(settings.store.ytBrowser ?? "").catch?.(() => { });
         createPill();
         startManager();
         updateTimer = setInterval(checkUpdateReady, 5_000);
