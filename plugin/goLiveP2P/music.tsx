@@ -5,7 +5,7 @@
 
 import { React, ReactDOM, useEffect, useRef, useState } from "@webpack/common";
 
-import { currentTrack, Track } from "./musicCore";
+import { currentTrack, MAX_QUEUE, Track } from "./musicCore";
 import type { Found } from "./musicNative";
 import { Avatars, col, Controls, Cover, EASE, ellipsis, ensureCss, fmt, Grip, Heart, Icon, IconBtn, SeekBar, Volume, Wave } from "./musicParts";
 import { addLocalFiles, Bound, emit, isLocal, lyricsFor, plain, removeLocal, runSearch, S, sameLocal, saveLists, setListening, setView, subs, toggleLyrics, toTrack, View } from "./musicState";
@@ -111,7 +111,7 @@ function SaveAs({ items }: { items: Found[]; }) {
     const save = () => {
         const n = name.trim().slice(0, 60);
         if (!n) return;
-        S.playlists = [{ name: n, items: items.filter(f => !isLocal(f)).map(plain).slice(0, 500) }, ...S.playlists.filter(p => p.name !== n)];
+        S.playlists = [{ name: n, items: items.filter(f => !isLocal(f)).map(plain).slice(0, MAX_LIST) }, ...S.playlists.filter(p => p.name !== n)];
         setName(null); S.openList = 0; S.view = "playlists"; saveLists();
     };
     return (
@@ -124,7 +124,27 @@ function SaveAs({ items }: { items: Found[]; }) {
     );
 }
 
+const MAX_LIST = 2000;
 const addAll = (b: Bound, items: Found[]) => b.sync.do({ t: "add", tracks: items.map(f => toTrack(f, b.myId)) });
+
+/** Botoes de por na fila. A fila da chamada guarda ate MAX_QUEUE musicas: playlist maior entra por partes (em ordem ou sorteadas). */
+function AddButtons({ b, items }: { b: Bound; items: Found[]; }) {
+    const room = Math.max(0, MAX_QUEUE - b.sync.state.queue.length);
+    if (!items.length) return null;
+    if (!room) return <span style={{ color: col.muted, fontSize: 12 }}>A fila esta cheia ({MAX_QUEUE} musicas)</span>;
+    if (items.length <= room) return <button className="pdl-b" onClick={() => addAll(b, items)} style={{ ...pill, color: "#fff", background: col.brand }}>Adicionar as {items.length} na fila</button>;
+    const shuffled = () => {
+        const a = items.slice();
+        for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; }
+        return a.slice(0, room);
+    };
+    return (
+        <>
+            <button className="pdl-b" onClick={() => addAll(b, shuffled())} style={{ ...pill, color: "#fff", background: col.brand }}>Adicionar {room} sorteadas</button>
+            <button className="pdl-b" onClick={() => addAll(b, items.slice(0, room))} style={{ ...pill, color: col.text, background: col.hover }}>Adicionar as {room} primeiras</button>
+        </>
+    );
+}
 
 function Results({ b, items, empty, bulk, onRemove }: { b: Bound; items: Found[]; empty: string; bulk?: boolean; onRemove?: (f: Found) => void; }) {
     if (!items.length) return <Empty>{empty}</Empty>;
@@ -132,7 +152,7 @@ function Results({ b, items, empty, bulk, onRemove }: { b: Bound; items: Found[]
         <div>
             {bulk && items.length > 1 && (
                 <div style={{ display: "flex", gap: 8, padding: "2px 6px 8px", flexWrap: "wrap" }}>
-                    <button className="pdl-b" onClick={() => addAll(b, items)} style={{ ...pill, color: "#fff", background: col.brand }}>Adicionar as {items.length} na fila</button>
+                    <AddButtons b={b} items={items} />
                     <SaveAs items={items} />
                 </div>
             )}
@@ -149,7 +169,7 @@ function Playlists({ b }: { b: Bound; }) {
                 <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 2px 4px" }}>
                     <IconBtn size={26} title="Voltar para as playlists" onClick={() => { S.openList = -1; emit(); }}><Icon n="seta" size={15} /></IconBtn>
                     <div style={{ flex: 1, minWidth: 0, fontWeight: 600, color: col.strong, ...ellipsis }}>{p.name}</div>
-                    {p.items.length > 0 && <button className="pdl-b" onClick={() => addAll(b, p.items)} style={{ ...pill, color: "#fff", background: col.brand }}>Adicionar as {p.items.length} na fila</button>}
+                    <AddButtons b={b} items={p.items} />
                 </div>
                 <Results b={b} items={p.items} empty="Esta playlist esta vazia." onRemove={f => { p.items = p.items.filter(x => x !== f); saveLists(); }} />
             </div>
@@ -176,18 +196,18 @@ function ImportList() {
         if (!link || busy) return;
         if (!/^https?:\/\//i.test(link)) { setMsg({ ok: false, text: "Cole o link da playlist (comeca com https://)." }); return; }
         setBusy(true); setMsg(null);
-        const r = await NativeMusic.musicSearch(link).catch((e: any) => ({ ok: false, error: String(e?.message ?? e) }));
+        const r = await NativeMusic.musicSearch(link, MAX_LIST).catch((e: any) => ({ ok: false, error: String(e?.message ?? e) }));
         setBusy(false);
         if (!r.ok) { setMsg({ ok: false, text: r.error }); return; }
         if (!r.list || !r.items.length) { setMsg({ ok: false, text: "Esse link nao e de uma playlist ou album." }); return; }
         const base = (r.name || "Playlist importada").trim();
         let name = base;
         for (let i = 2; S.playlists.some(p => p.name === name); i++) name = `${base} (${i})`;
-        S.playlists = [{ name, items: r.items.map(plain).slice(0, 500) }, ...S.playlists];
+        S.playlists = [{ name, items: r.items.map(plain).slice(0, MAX_LIST) }, ...S.playlists];
         saveLists(); setUrl("");
         setMsg({
-            ok: true, text: `"${name}" importada com ${Math.min(r.items.length, 500)} musicas.` + (r.capped
-                ? " O Spotify so libera as 100 primeiras pelo link. Para trazer a playlist inteira, passe ela para o YouTube (o site TuneMyMusic faz isso de graca) e cole aqui o link do YouTube."
+            ok: true, text: `"${name}" importada com ${Math.min(r.items.length, MAX_LIST)} musicas.` + (r.capped
+                ? " O Spotify so libera as 100 primeiras pelo link, entao o resto ficou de fora. Para trazer a playlist inteira (ate " + MAX_LIST + "), passe ela para o YouTube pelo site TuneMyMusic (gratis) e cole aqui o link da playlist do YouTube."
                 : "")
         });
     };
@@ -200,7 +220,7 @@ function ImportList() {
                     onKeyDown={e => { e.stopPropagation(); if (e.key === "Enter") go(); }}
                     style={{ all: "unset", flex: 1, minWidth: 0, fontSize: 12, color: col.text, background: col.hover, padding: "6px 10px", borderRadius: 6 }}
                 />
-                <button className="pdl-b" onClick={go} style={{ ...pill, color: "#fff", background: col.brand, opacity: busy ? .6 : 1 }}>{busy ? "Importando..." : "Importar"}</button>
+                <button className="pdl-b" onClick={go} style={{ ...pill, color: "#fff", background: col.brand, opacity: busy ? .6 : 1 }}>{busy ? "Importando (playlist grande demora)..." : "Importar"}</button>
             </div>
             {msg && <div style={{ fontSize: 12, marginTop: 6, lineHeight: 1.4, color: msg.ok ? col.green : col.red }}>{msg.text}</div>}
         </div>

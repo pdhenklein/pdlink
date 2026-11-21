@@ -292,7 +292,7 @@ export async function musicResolve(ref: string, title: string, artist: string, d
 }
 
 /** Busca por nome, ou le um link (musica ou playlist). */
-export async function musicSearch(query: string): Promise<{ ok: true; items: Found[]; list: boolean; name?: string; capped?: boolean; } | { ok: false; error: string; }> {
+export async function musicSearch(query: string, max = 500): Promise<{ ok: true; items: Found[]; list: boolean; name?: string; capped?: boolean; } | { ok: false; error: string; }> {
     try {
         query = String(query ?? "").trim().slice(0, 400);
         if (!query) return { ok: true, items: [], list: false };
@@ -305,7 +305,7 @@ export async function musicSearch(query: string): Promise<{ ok: true; items: Fou
         }
         await ensureTool();
         const target = isUrl ? query : "ytsearch8:" + query;
-        const out = await run(["-J", "--flat-playlist", "--playlist-end", "500", "--", target], 60000);
+        const out = await run(["-J", "--flat-playlist", "--playlist-end", String(Math.min(2000, Math.max(1, Math.round(Number(max) || 500)))), "--", target], 180000);
         const d = JSON.parse(out);
         const entries: any[] = Array.isArray(d.entries) ? d.entries : [d];
         const items = entries.map(toFound).filter((x): x is Found => !!x);

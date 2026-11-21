@@ -10,6 +10,7 @@ import { MusicButton } from "./music";
 import { showUpdateBanner } from "./updateBanner";
 import { getWatchUrl, startManager, stopManager } from "./manager";
 import { Settings } from "@api/Settings";
+import { startChatVolume, stopChatVolume } from "./chatVolume";
 import { settings } from "./settings";
 import { getLiveEntry, refreshLiveOutput } from "./nativeUi";
 import { applyViewFilter } from "./viewPrefs";
@@ -550,12 +551,14 @@ export default definePlugin({
         applyViewFilter();
         Native.musicSetBrowser?.(settings.store.ytBrowser ?? "").catch?.(() => { });
         createPill();
+        startChatVolume();
         startManager();
         updateTimer = setInterval(checkUpdateReady, 5_000);
         setTimeout(checkUpdateReady, 8_000);
     },
 
     stop() {
+        stopChatVolume();
         stopManager();
         clearInterval(updateTimer);
         unsub?.();

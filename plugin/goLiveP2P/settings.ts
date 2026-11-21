@@ -1,5 +1,5 @@
 import { definePluginSettings } from "@api/Settings";
-import { OptionType } from "@utils/types";
+import { makeRange, OptionType } from "@utils/types";
 
 import { VersionInfo } from "./versionInfo";
 
@@ -21,6 +21,13 @@ export const settings = definePluginSettings({
             { label: "Opera GX", value: "operagx" }
         ],
         onChange: (v: string) => { (VencordNative.pluginHelpers.pdLink as any)?.musicSetBrowser?.(v).catch?.(() => { }); }
+    },
+    chatVolume: {
+        type: OptionType.SLIDER,
+        description: "Volume inicial de audios e videos mandados no chat (o Discord toca no maximo). 100 = deixar como o Discord faz",
+        markers: makeRange(0, 100, 10),
+        stickToMarkers: false,
+        default: 30
     },
     musicNotify: { type: OptionType.BOOLEAN, description: "Avisar quando alguem colocar uma musica na chamada e quando a musica mudar", default: true },
     markColor: { type: OptionType.STRING, description: "Cor do ping e do desenho", default: "#3b82f6", hidden: true },

@@ -1793,9 +1793,15 @@ static int runStream(StreamOpts o) {
     int testDrop = o.testDrop; // so para teste: ignora os primeiros quadros, simulando uma captura que nao entrega
     const double minGap = 1.0 / o.fps - 0.002;
     wgc::Direct3D11CaptureFramePool pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(g.d3d, wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
-    pool.FrameArrived([&](wgc::Direct3D11CaptureFramePool const& sender, winrt::Windows::Foundation::IInspectable const&) {
+    // Jogo em tela cheia (exclusiva ou "sem bordas") e em foco: o Windows manda a imagem direto para o monitor e a captura
+    // da JANELA para de receber quadros (so volta no Alt+Tab). Nesse caso a imagem passa a vir do MONITOR do jogo.
+    std::atomic<bool> useMon{ false };
+    std::atomic<double> lastWinFrame{ nowSec() };
+    auto onFrame = [&](wgc::Direct3D11CaptureFramePool const& sender, bool fromMon) {
         auto frame = sender.TryGetNextFrame();
         if (!frame || !running) return;
+        if (!fromMon) lastWinFrame = nowSec();
+        if (fromMon != useMon.load()) return;
         std::lock_guard<std::mutex> lk(mtx);
         auto cs = frame.ContentSize();
         if (testDrop > 0) { testDrop--; return; }
@@ -1831,7 +1837,7 @@ static int runStream(StreamOpts o) {
                     }
                 }
             }
-            pool.Recreate(g.d3d, wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, cs);
+            sender.Recreate(g.d3d, wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, cs);
             return;
         }
         double now = nowSec();
@@ -1879,7 +1885,8 @@ static int runStream(StreamOpts o) {
             queue.push_back(std::move(j));
         }
         qCv.notify_one();
-    });
+    };
+    pool.FrameArrived([&](wgc::Direct3D11CaptureFramePool const& s, winrt::Windows::Foundation::IInspectable const&) { onFrame(s, false); });
 
     auto session = pool.CreateCaptureSession(item);
     bool follow = (o.cursor == "follow") && o.hwnd;
@@ -1919,6 +1926,63 @@ static int runStream(StreamOpts o) {
                 }
                 Sleep(30);
             }
+        });
+    }
+
+    // ---- tela cheia: troca para a captura do monitor enquanto o jogo cobre o monitor, esta em foco e a janela parou de mandar quadros
+    std::thread monThread;
+    if (o.hwnd && !envOn("GLV_NO_MONFALLBACK")) {
+        monThread = std::thread([&] {
+            winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            wgc::Direct3D11CaptureFramePool monPool{ nullptr };
+            wgc::GraphicsCaptureSession monSess{ nullptr };
+            auto closeMon = [&] {
+                try { if (monSess) monSess.Close(); } catch (...) {}
+                try { if (monPool) monPool.Close(); } catch (...) {}
+                monSess = nullptr; monPool = nullptr;
+            };
+            while (running) {
+                Sleep(100);
+                HMONITOR hm = MonitorFromWindow(o.hwnd, MONITOR_DEFAULTTONULL);
+                MONITORINFO mi{ sizeof mi };
+                RECT wr{};
+                bool full = hm && GetMonitorInfoW(hm, &mi) && GetWindowRect(o.hwnd, &wr) && !IsIconic(o.hwnd)
+                    && wr.left <= mi.rcMonitor.left && wr.top <= mi.rcMonitor.top && wr.right >= mi.rcMonitor.right && wr.bottom >= mi.rcMonitor.bottom;
+                bool fg = isTargetFocused(o.hwnd);
+                if (!useMon) {
+                    if (!full || !fg || nowSec() - lastWinFrame < 0.3) continue;
+                    wgc::GraphicsCaptureItem mitem{ nullptr };
+                    auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+                    if (FAILED(interop->CreateForMonitor(hm, winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(mitem))) || !mitem) {
+                        fprintf(stderr, "tela cheia: nao consegui capturar o monitor do jogo\n");
+                        Sleep(2000);
+                        continue;
+                    }
+                    try {
+                        monPool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(g.d3d, wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, mitem.Size());
+                        monPool.FrameArrived([&](wgc::Direct3D11CaptureFramePool const& s, winrt::Windows::Foundation::IInspectable const&) { onFrame(s, true); });
+                        monSess = monPool.CreateCaptureSession(mitem);
+                        try { monSess.IsCursorCaptureEnabled(o.cursor != "never"); } catch (...) {}
+                        try { monSess.IsBorderRequired(false); } catch (...) {}
+                        try { monSess.MinUpdateInterval(winrt::Windows::Foundation::TimeSpan{ (int64_t)envNum("GLV_MINUPD_US", 600000 / std::max(1, o.fps)) * 10 }); } catch (...) {}
+                        useMon = true;
+                        monSess.StartCapture();
+                        fprintf(stderr, "tela cheia: janela parou de mandar quadros, capturando o monitor do jogo\n");
+                    } catch (...) {
+                        useMon = false;
+                        closeMon();
+                        fprintf(stderr, "tela cheia: falha ao iniciar a captura do monitor\n");
+                        Sleep(2000);
+                    }
+                } else if (!full || !fg) {
+                    useMon = false;
+                    closeMon();
+                    lastWinFrame = nowSec();
+                    fprintf(stderr, "tela cheia: jogo saiu do foco, voltando a capturar a janela\n");
+                }
+            }
+            useMon = false;
+            closeMon();
         });
     }
 
@@ -2049,6 +2113,7 @@ static int runStream(StreamOpts o) {
     try { session.Close(); } catch (...) {}
     try { pool.Close(); } catch (...) {}
     if (ct.joinable()) ct.join();
+    if (monThread.joinable()) monThread.join();
     if (at.joinable()) at.join();
     if (cadenceThread.joinable()) cadenceThread.join();
     if (pumpThread.joinable()) {

@@ -107,7 +107,7 @@ export async function getSources(_: IpcMainInvokeEvent, q: SourcesQuery = {}) {
         }
     };
     // janelas que o seletor nativo do Discord nao mostra
-    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "golive-helper-p8.exe", "golive-helper-p12.exe", "golive-helper-p13.exe", "golive-helper-p14.exe", "golive-helper-p15.exe", "golive-helper-p16.exe", "golive-helper-p17.exe", "golive-helper-p18.exe", "golive-helper-p19.exe", "golive-helper-p20.exe", "golive-helper-p21.exe", "whatsapp.root.exe", "whatsapp.exe"]);
+    const hidden = new Set(["discord.exe", "explorer.exe", "applicationframehost.exe", "systemsettings.exe", "textinputhost.exe", "golive-helper.exe", "golive-helper-p6.exe", "golive-helper-p7.exe", "golive-helper-p8.exe", "golive-helper-p12.exe", "golive-helper-p13.exe", "golive-helper-p14.exe", "golive-helper-p15.exe", "golive-helper-p16.exe", "golive-helper-p17.exe", "golive-helper-p18.exe", "golive-helper-p19.exe", "golive-helper-p20.exe", "golive-helper-p21.exe", "golive-helper-p22.exe", "whatsapp.root.exe", "whatsapp.exe"]);
     list.windows = list.windows.filter((w: any) => !hidden.has(String(w.exe).toLowerCase()));
     const windows = list.windows.map((w: any) => ({ ...w, thumb: thumb("w" + w.hwnd), icon: icon("i" + w.hwnd) }));
     const monitors = list.monitors.map((m: any) => ({ ...m, thumb: thumb("m" + m.index) }));
@@ -223,7 +223,7 @@ export async function startStream(_: IpcMainInvokeEvent, o: StreamOpts) {
     proc.stderr!.on("data", (d: Buffer) => {
         lastError = d.toString("utf8").slice(-300); lastStat = d.toString("utf8");
         // entrou ou saiu programa do som do monitor: sempre anota (para saber de onde veio um som que vazou)
-        if (errLines++ < 8 || /^audio: [+-] /m.test(lastStat)) logLine("captura diz: " + lastStat.trim().slice(0, 300));
+        if (errLines++ < 8 || /^(audio: [+-] |tela cheia:)/m.test(lastStat)) logLine("captura diz: " + lastStat.trim().slice(0, 300));
     });
     proc.on("exit", code => {
         logLine(`captura: encerrada (codigo ${code})${code ? " - " + lastError.trim().slice(-200) : ""}`);
@@ -321,7 +321,7 @@ logLine("parte de fundo do pdLink iniciada");
 // ---- musica
 musicInit(PACKAGED ? join(PKG_DIR, "..", "music") : "F:/Discord2/probe/music", t => logLine(t));
 setTimeout(musicClean, 30000); setInterval(musicClean, 6 * 3600 * 1000);
-export function musicSearch(_: IpcMainInvokeEvent, query: string) { return mSearch(query); }
+export function musicSearch(_: IpcMainInvokeEvent, query: string, max?: number) { return mSearch(query, max); }
 export function musicFetch(_: IpcMainInvokeEvent, ref: string) { return mFetch(String(ref)); }
 export function musicSetBrowser(_: IpcMainInvokeEvent, b: string) { musicBrowser(String(b ?? "")); }
 // Entrar com o YouTube: abre a pagina de login no navegador padrao (a pessoa entra la mesmo) e passa a usar esse navegador
