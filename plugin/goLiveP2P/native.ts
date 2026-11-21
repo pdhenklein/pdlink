@@ -7,6 +7,7 @@ import { createServer, Server, ServerResponse } from "http";
 import { tmpdir } from "os";
 import { join } from "path";
 
+import "./embedVolume";
 import { closeAll, closeFile, openFile, reveal, saveDialog, writeFile } from "./fileNative";
 import { defaultBrowser, musicBrowser, musicCheckLogin, musicClean, musicClock as mClock, musicFetch as mFetch, musicInit, musicLyrics as mLyrics, musicResolve as mResolve, musicSearch as mSearch } from "./musicNative";
 import { overlayInfo, sendOverlay, showToast, startOverlay, stopOverlay } from "./overlay";

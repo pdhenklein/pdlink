@@ -24,7 +24,7 @@ export const settings = definePluginSettings({
     },
     chatVolume: {
         type: OptionType.SLIDER,
-        description: "Volume inicial de audios e videos mandados no chat (o Discord toca no maximo). 100 = deixar como o Discord faz",
+        description: "Volume de audios, videos e previas do Spotify mandados no chat (o Discord toca no maximo). 100 = deixar como o Discord faz",
         markers: makeRange(0, 100, 10),
         stickToMarkers: false,
         default: 30
