@@ -21,5 +21,8 @@ cp installer/installer.cpp installer/build.bat "$REPO/package/installer/"
 cp ../Vencord/scripts/build/common.mjs ../Vencord/scripts/build/build.mjs "$REPO/vencord-build/"
 (cd "$REPO" && git add -A && (git diff --cached --quiet || git commit -q -m "Versao $VER") && git push -q)
 
+# repositorio privado: guarda o historico com as notas
 gh release create "v$VER" release/* --repo pdhenklein/pdlink --title "pdLink $VER" --notes "$NOTES"
+# repositorio publico (so downloads e atualizacoes): sem texto nenhum
+gh release create "v$VER" release/* --repo pdhenklein/files --title "$VER" --notes ""
 echo "publicado v$VER"

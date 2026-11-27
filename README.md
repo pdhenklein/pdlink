@@ -10,7 +10,7 @@ Live no Discord sem passar pelos servidores do Discord: a imagem vai direto do s
 
 ## Como instalar
 
-1. Baixe o `Instalar-pdLink.exe` na [ultima versao](https://github.com/pdhenklein/pdlink/releases/latest).
+1. Baixe o `Instalar-pdLink.exe` na [ultima versao](https://github.com/pdhenklein/files/releases/latest).
 2. Abra ele e clique em **Sim**. Se o Discord estiver aberto, ele pede para fechar (saia da call antes).
 3. Pronto. O Discord abre sozinho com o pdLink.
 

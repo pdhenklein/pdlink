@@ -8,7 +8,7 @@
 #include <vector>
 
 static const wchar_t* TITLE = L"pdLink";
-static const wchar_t* BASE_URL = L"https://github.com/pdhenklein/pdlink/releases/latest/download/";
+static const wchar_t* BASE_URL = L"https://github.com/pdhenklein/files/releases/latest/download/";
 static const wchar_t* FILES[] = { L"patcher.js", L"preload.js", L"renderer.js", L"renderer.css", L"viewer.html",
                                   L"viewer-hw.js", L"golive-helper.exe", L"golive-shim.asar", L"version.txt" };
 

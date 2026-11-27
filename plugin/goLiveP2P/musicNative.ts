@@ -447,7 +447,7 @@ export function parseLrc(text: string): LyricLine[] {
 }
 
 async function lrclib(path: string) {
-    const r = await fetch("https://lrclib.net/api/" + path, { headers: { "user-agent": "pdLink (https://github.com/pdhenklein/pdlink)" }, signal: AbortSignal.timeout(10000) });
+    const r = await fetch("https://lrclib.net/api/" + path, { headers: { "user-agent": "pdLink" }, signal: AbortSignal.timeout(10000) });
     if (r.status === 404) return null;
     if (!r.ok) throw new Error("o site de letras nao respondeu (" + r.status + ")");
     const text = await r.text();

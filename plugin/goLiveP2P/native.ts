@@ -28,7 +28,7 @@ const PKG_DIR = __dirname;
 const PACKAGED = existsSync(join(PKG_DIR, "golive-helper.exe"));
 const VIEWER_PAGE = PACKAGED ? join(PKG_DIR, "viewer.html") : "F:/Discord2/Vencord/src/userplugins/goLiveP2P/viewer.html";
 const WATCH_PORT = 47615;
-const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p21.exe";
+const HELPER = PACKAGED ? join(PKG_DIR, "golive-helper.exe") : "F:\\Discord2\\helper\\bin\\golive-helper-p22.exe";
 // relatorios de diagnostico: no pacote ficam na pasta de dados do usuario
 const PROBE_DIR = PACKAGED ? join(PKG_DIR, "..", "logs") : "F:/Discord2/probe";
 
@@ -380,7 +380,7 @@ export function localToken(_: IpcMainInvokeEvent) {
 
 // Atualizacao automatica (so na versao instalada): baixa a versao nova para "pending";
 // o carregador troca os arquivos na proxima vez que o Discord abrir.
-const REPO = "pdhenklein/pdlink";
+const REPO = "pdhenklein/files";
 const PENDING_DIR = join(PKG_DIR, "..", "pending");
 let update = { current: "", ready: "", error: "" };
 
@@ -452,6 +452,19 @@ async function checkUpdate() {
 if (PACKAGED) {
     setTimeout(checkUpdate, 5_000);
     setInterval(checkUpdate, 60_000);
+} else {
+    // build de desenvolvimento: nao instala nada, mas mostra a mesma faixa "Atualizar" de todo mundo quando sai
+    // uma versao no GitHub depois que o Discord abriu (para ver o aviso que os outros recebem)
+    let devBase = "";
+    const devCheck = async () => {
+        try {
+            const v = await latestVersion();
+            if (!devBase) devBase = v;
+            else if (newer(v, devBase)) update.ready = v;
+        } catch { }
+    };
+    setTimeout(devCheck, 5_000);
+    setInterval(devCheck, 60_000);
 }
 
 export function updateStatus(_: IpcMainInvokeEvent) {
@@ -467,7 +480,7 @@ export function updateStatus(_: IpcMainInvokeEvent) {
  * Devolve "ok" ou o motivo de nao ter feito nada.
  */
 export function updateRestart(_: IpcMainInvokeEvent) {
-    if (!PACKAGED) return "so na versao instalada";
+    if (!PACKAGED) return "na build de desenvolvimento nao ha nada para instalar, foi so o aviso";
     const ready = readVersion(PENDING_DIR);
     if (!ready || !newer(ready, readVersion(PKG_DIR))) return "nao ha atualizacao baixada";
     if (!relaunchAfterExit(discordUpdateExe(), 5)) return "nao achei o Discord para reabrir";
